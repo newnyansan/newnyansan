@@ -1,0 +1,27 @@
+# FreeLLMAPI, pinned to v0.16.26 (upstream: github.com/tashfeenahmed/freellmapi).
+# Bump FREELLMAPI_VERSION in .env (or the default below) to upgrade.
+services:
+  freellmapi:
+    image: ghcr.io/tashfeenahmed/freellmapi:${FREELLMAPI_VERSION:-v0.16.26}
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+    # Localhost only by default. Set HOST_BIND=0.0.0.0 in .env for LAN access.
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${PORT:-3001}:3001"
+    volumes:
+      - freellmapi-data:/app/server/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/ping').then((r)=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  freellmapi-data:
