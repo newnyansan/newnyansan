@@ -290,6 +290,32 @@ class SettingsTests(Base):
         self.assertEqual((s.old_download_days, s.large_file_mb), (180, 7))
 
 
+class AppTests(Base):
+    def test_mobile_module_imports_without_kivy(self):
+        import importlib
+        m = importlib.import_module("safesweep.mobile")
+        self.assertEqual(m.human(2048), "2.0 KB")
+        self.assertTrue(m.has_storage_access())  # desktop: always true
+
+    def test_installed_program_folder_is_protected(self):
+        from safesweep import config
+        os.environ["ANDROID_PRIVATE"] = str(self.data)
+        try:
+            self.assertTrue(config.is_protected(str(self.data / "app" / "main.pyc")))
+        finally:
+            del os.environ["ANDROID_PRIVATE"]
+        self.assertFalse(config.is_protected(str(self.data / "x")))
+
+    def test_packaging_files_are_consistent(self):
+        spec = (PKG_DIR / "buildozer.spec").read_text()
+        for needed in ("main.py", "safesweep/data/*.txt", "assets/icon.png", "MANAGE_EXTERNAL_STORAGE"):
+            self.assertIn(needed, spec)
+        for p in ("assets/icon.png", "assets/icon.ico", "assets/presplash.png", "main.py",
+                  "packaging/windows/safesweep.spec", "packaging/windows/installer.iss",
+                  "packaging/android/manifest_application_args.xml"):
+            self.assertTrue((PKG_DIR / p).exists(), p)
+
+
 class CliTests(Base):
     def run_cli(self, *args, stdin=""):
         env = dict(os.environ, PYTHONPATH=str(PKG_DIR))

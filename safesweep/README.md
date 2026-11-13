@@ -29,18 +29,63 @@ A cautious **virus scanner + junk cleaner** for PC (Windows, macOS, Linux) and A
 
 Tested against ~6,600 real-world files (the Python standard library, system libraries, `/usr/share/doc`), including a simulated "3 years later" run: **zero false alarms**.
 
-## Install & run
+## Install
 
-Requires Python 3.9+. No third-party packages.
+### Windows (installer)
+
+1. Download **`SafeSweep-Setup-<version>.exe`** (see *Getting the installers* below).
+2. Double-click it. No administrator rights are needed - it installs just for you.
+   Windows may show *"Windows protected your PC"* because the installer isn't code-signed:
+   click **More info → Run anyway**.
+3. Start **SafeSweep** from the Start menu (there is also a *SafeSweep self-test* shortcut).
+
+Uninstall from *Settings → Apps*. Your Review folder (`%LOCALAPPDATA%\SafeSweep`) is kept, so
+nothing waiting for review is lost.
+
+### Android (APK)
+
+1. Copy **`safesweep-<version>-*-debug.apk`** to your phone and tap it.
+2. Allow *Install unknown apps* for your browser/file manager when asked.
+3. Open SafeSweep and tap **Open settings → Allow access to manage all files** (needed to scan
+   your storage; your files never leave the phone).
+4. Scan / Clean / Review work like on the PC. The Review folder is `SafeSweep/Review` on your phone
+   storage, so you can also look at it in any file manager (it's hidden from the gallery).
+
+Works on Android 7+ (64-bit and 32-bit ARM phones, and x86_64 Chromebooks/emulators).
+Android doesn't let any app look inside other apps' private data, so SafeSweep checks your shared
+storage: Downloads, photos, WhatsApp/Telegram media, documents, etc.
+
+### Getting the installers
+
+Every push builds both automatically (GitHub → *Actions* → **SafeSweep apps** → latest run →
+*Artifacts*): `SafeSweep-Windows-Installer` and `SafeSweep-Android-APK`.
+Before they are published, each one is tested for real:
+
+- **Windows:** the built program runs its self-test, then the installer is installed silently, the
+  installed program runs its self-test, the window is opened, and it is uninstalled again.
+- **Android:** the APK is installed on an Android 13 emulator with test files; the app runs its
+  self-test, a virus scan, a cleanup and a move to Review, and every result is checked.
+
+### Build them yourself
 
 ```bash
-cd safesweep
-pip install .            # gives you the `safesweep` and `safesweep-gui` commands
-safesweep                # opens the window
+# Windows (on a Windows PC with Python 3.9+ and Inno Setup 6)
+pip install pyinstaller
+pyinstaller packaging/windows/safesweep.spec
+iscc /DAppVersion=0.3.0 packaging/windows/installer.iss     # -> dist/SafeSweep-Setup-0.3.0.exe
+
+# Android (on Linux/macOS/WSL)
+pip install buildozer "cython<=3.0.12"
+buildozer android debug                                     # -> bin/*.apk
 ```
 
-Or run without installing: `python -m safesweep` (window) / `python -m safesweep --help`.
-Double-click launchers: **`SafeSweep.bat`** (Windows), **`SafeSweep.command`** (macOS/Linux).
+### Run from source (any OS)
+
+```bash
+pip install .            # gives you the `safesweep` and `safesweep-gui` commands
+safesweep                # opens the window
+pip install kivy && python main.py   # the phone app, in a desktop window
+```
 
 ### Command line
 
@@ -77,7 +122,7 @@ check it works). For actual virus definitions install ClamAV - SafeSweep detects
 
 ## Mobile
 
-- **Android**: install [Termux](https://f-droid.org/packages/com.termux/), then:
+- **Android app**: see *Install → Android* above. Alternatively install [Termux](https://f-droid.org/packages/com.termux/), then:
   ```bash
   pkg install python git
   termux-setup-storage            # allow access to your phone's shared storage
@@ -108,7 +153,7 @@ doesn't inspect running processes or memory.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v   # 28 unit tests (includes the 56-check self-test)
+python -m unittest discover -s tests -v   # 31 unit tests (includes the 56-check self-test)
 python -m safesweep selftest
 ```
 

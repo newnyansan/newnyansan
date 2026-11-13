@@ -14,7 +14,33 @@ MACOS = sys.platform == "darwin"
 
 
 def is_android() -> bool:
-    return "ANDROID_ROOT" in os.environ or "com.termux" in os.environ.get("PREFIX", "")
+    return ("ANDROID_ROOT" in os.environ or "ANDROID_ARGUMENT" in os.environ
+            or "com.termux" in os.environ.get("PREFIX", ""))
+
+
+def is_android_app() -> bool:
+    """Running as the installed Android app (python-for-android), not in Termux."""
+    return "ANDROID_ARGUMENT" in os.environ or "ANDROID_PRIVATE" in os.environ
+
+
+def android_shared_storage() -> Path | None:
+    for p in (Path.home() / "storage" / "shared", Path("/storage/emulated/0"), Path("/sdcard")):
+        if p.is_dir():
+            return p
+    return None
+
+
+def program_dirs() -> list[str]:
+    """Where SafeSweep itself is installed - never scanned or cleaned."""
+    dirs = []
+    if getattr(sys, "frozen", False):
+        dirs.append(os.path.dirname(os.path.abspath(sys.executable)))
+        if getattr(sys, "_MEIPASS", None):
+            dirs.append(sys._MEIPASS)  # type: ignore[attr-defined]
+    for key in ("ANDROID_PRIVATE", "ANDROID_APP_PATH", "ANDROID_UNPACK"):
+        if os.environ.get(key):
+            dirs.append(os.environ[key])
+    return dirs
 
 
 def app_home() -> Path:
@@ -44,8 +70,8 @@ def _existing(paths) -> list[str]:
 def default_scan_paths() -> list[str]:
     home = Path.home()
     if is_android():
-        shared = home / "storage" / "shared"  # created by `termux-setup-storage`
-        return _existing([shared]) or [str(home)]
+        shared = android_shared_storage()  # Termux: created by `termux-setup-storage`
+        return _existing([shared]) if shared else [str(home)]
     return _existing([home / "Downloads", home / "Desktop", home / "Documents"]) or [str(home)]
 
 
@@ -69,12 +95,11 @@ def cache_roots() -> list[str]:
 
 def default_junk_paths() -> list[str]:
     home = Path.home()
-    extra = []
     if is_android():
-        extra.append(home / "storage" / "shared" / "Download")
-    else:
-        extra.append(home / "Downloads")
-    return _existing([*system_temp_dirs(), *cache_roots(), *extra])
+        # Phone storage only: the app's own temp/cache folders hold its program files.
+        shared = android_shared_storage()
+        return _existing([shared]) if shared else []
+    return _existing([*system_temp_dirs(), *cache_roots(), home / "Downloads"])
 
 
 def protected_prefixes() -> list[str]:
@@ -112,6 +137,8 @@ def is_protected(path: str | os.PathLike) -> bool:
     path = os.fspath(path)
     if path_is_within(path, str(app_home())):
         return True  # never scan/move SafeSweep's own data (incl. the Review folder)
+    if any(path_is_within(path, d) for d in program_dirs()):
+        return True  # SafeSweep's own installed program files
     return any(path_is_within(path, pref) for pref in protected_prefixes())
 
 

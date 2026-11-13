@@ -49,7 +49,9 @@ class _Checker:
 def run_selftest(out: Callable[[str], None] = print, keep: bool = False) -> tuple[bool, list[str]]:
     from .config import Settings
     user_settings = Settings.load()  # only used for the ClamAV options
-    sandbox = Path(tempfile.mkdtemp(prefix="safesweep-selftest-"))
+    from .config import is_protected
+    base = None if not is_protected(tempfile.gettempdir()) else str(Path.home())
+    sandbox = Path(tempfile.mkdtemp(prefix="safesweep-selftest-", dir=base))
     old_home = os.environ.get("SAFESWEEP_HOME")
     os.environ["SAFESWEEP_HOME"] = str(sandbox / "app")
     c = _Checker(out)

@@ -53,8 +53,24 @@ def run() -> int:
     events: queue.Queue = queue.Queue()
     busy = {"n": 0}
 
+    if sys.platform.startswith("win"):
+        try:  # crisp text on high-DPI screens + own taskbar icon
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SafeSweep.App")
+        except (AttributeError, OSError):
+            pass
     root = tk.Tk()
     root.title("SafeSweep")
+    here = os.path.dirname(os.path.abspath(__file__))
+    for base in (getattr(sys, "_MEIPASS", None), os.path.join(here, ".."), here):
+        icon_path = os.path.join(base, "assets", "icon.png") if base else ""
+        if icon_path and os.path.exists(icon_path):
+            try:
+                root.iconphoto(True, tk.PhotoImage(file=icon_path))
+            except tk.TclError:
+                pass
+            break
     root.geometry("1040x640")
     root.minsize(760, 480)
     style = ttk.Style()
