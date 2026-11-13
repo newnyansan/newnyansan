@@ -9,10 +9,25 @@ A cautious **virus scanner + junk cleaner** for PC (Windows, macOS, Linux) and A
 
 | Feature | Details |
 |---|---|
-| 🛡 **Virus Scan** | Known-malware hashes (SHA-256 list), **ClamAV** if installed (used automatically), and heuristics: fake double extensions (`invoice.pdf.exe`), programs disguised as images/docs, hidden right-to-left filename tricks, `autorun.inf`, macro documents, and dangerous script patterns (encoded PowerShell, download-and-run, ransomware commands like deleting shadow copies). |
-| 🧹 **Cleanup** | Temp/leftover files (`.tmp`, `.part`, `.crdownload`, `~$` …), stale caches, old logs, empty files, `Thumbs.db`/`.DS_Store`, **duplicates** (byte-identical; the oldest copy is kept), old installers in Downloads, downloads not opened in 180+ days, large unused files. |
-| 📂 **Review Folder** | Flagged files are moved here with a record of where they came from and why. Threats get a `.quarantined` suffix and their execute permission removed so they can't be run by accident. Restore puts files back exactly where they were. Auto-delete items older than N days (default 30) if you want. |
-| 🔒 **Safety** | Never follows symlinks, never touches OS folders (`C:\Windows`, `Program Files`, `/usr`, `/System`, Android `/system` …), skips its own data, supports exclude patterns. |
+| 🛡 **Virus Scan** | Known-malware hashes, the EICAR test file, **ClamAV** if installed (used automatically, falls back from the ClamAV service to `clamscan`, and tells you if ClamAV isn't working instead of pretending it scanned), plus heuristics: fake double extensions (`invoice.pdf.exe`, `contract.docx      .exe`), hidden right-to-left filename tricks, real Windows/Linux/Mac programs disguised as photos/documents (checked by file structure, not just the first bytes), and clearly malicious scripts (encoded PowerShell, download-and-run, deleting backups, turning off Defender). |
+| 🧹 **Cleanup** | Leftover temp files, stale caches, old logs, thumbnail caches, empty media/document files, **exact duplicates** (proved byte-for-byte; one copy always kept, preferring the one outside Downloads), old installers, downloads not opened in 180+ days, big unused files. |
+| ✓ **Recommended vs. "take a look"** | Items that are clearly safe to remove are marked ✓ and pre-selected. Things you might still want (old downloads, backups, big files, macro documents, install scripts) are listed but **not** pre-selected. |
+| 📂 **Review Folder** | Flagged files are moved here, not deleted. Threats get a `.quarantined` suffix and lose execute permission. Restore puts files back exactly where they were (never overwriting anything) with their original permissions. Optional auto-delete after 30 days. |
+| 🧪 **Self-test** | `safesweep selftest` (or *Help → Run self-test*) builds a sandbox with 50+ tricky cases - real threat patterns, harmless look-alikes, junk vs. important files, crash scenarios - and proves everything behaves correctly **on your device**. |
+
+## Safety rules (why it doesn't misfire)
+
+- **Never deletes on its own.** Only you delete, from the Review folder, after a confirmation.
+- **Never touches software:** folders with `.git`, `package.json`, `pyproject.toml`, `.sln`, program libraries (`.dll`/`.so`/`.dylib`), `node_modules`, virtual environments, Mac app bundles and libraries (`.app`, *Photos Library*), hidden config folders and `AppData`/`Library` are skipped.
+- **System folders are off-limits** (`C:\Windows`, `Program Files`, `ProgramData`, `/usr`, `/etc`, `/System`, `/Library`, `/Applications`, Android `/system`, Termux's own files).
+- **Anything changed in the last 24 hours is ignored** (it may be downloading or open).
+- **Old-age checks look at modified, opened *and* created/added dates**, so files freshly extracted from an old zip aren't mistaken for old ones.
+- **Duplicates:** only photos, videos, music, documents and archives of 100 KB+; hard links aren't duplicates; checked with a quick hash, a full SHA-256 *and* a byte-by-byte comparison.
+- **Just before moving, everything is re-checked:** if the file changed since the scan, or a duplicate's kept copy changed or disappeared, the move is refused.
+- **Never follows shortcuts/symlinks/junctions**, never loops, and never opens OneDrive/iCloud "online-only" files (which would download them).
+- **Crash-safe Review folder:** a record is written before each move; moves between drives are copy → verify → delete; a lock stops two windows clashing; a backup of the record file is kept; leftovers are repaired automatically on the next start. Every action is written to `activity.log`.
+
+Tested against ~6,600 real-world files (the Python standard library, system libraries, `/usr/share/doc`), including a simulated "3 years later" run: **zero false alarms**.
 
 ## Install & run
 
@@ -30,10 +45,12 @@ Double-click launchers: **`SafeSweep.bat`** (Windows), **`SafeSweep.command`** (
 ### Command line
 
 ```bash
-safesweep scan                      # scan your Downloads/Desktop/Documents, then pick what to move
+safesweep scan                      # scan Downloads/Desktop/Documents, then pick: r(ecommended) / a(ll) / 1,3-5 / n(one)
 safesweep scan D:\ E:\USB --report-only
 safesweep clean                     # find unneeded files
-safesweep clean ~/Downloads -y      # move everything found to Review without asking
+safesweep clean ~/Downloads -y      # move the recommended (✓) items to Review without asking
+safesweep clean ~/Downloads -y --all  # ...or everything found
+safesweep selftest                  # prove it works correctly on this device
 
 safesweep review list               # see what's waiting
 safesweep review restore <id>       # put it back
@@ -46,7 +63,7 @@ safesweep settings --set old_download_days=90 "exclude=*.iso;*/Photos/*"
 safesweep signatures add hashes.txt # import more SHA-256 malware hashes
 ```
 
-`safesweep scan` exits with code 1 if anything was found (handy for scheduled tasks).
+`safesweep scan` exits with code 1 if a medium/high threat was found (handy for scheduled tasks).
 
 ### Get real-world malware coverage: install ClamAV (free)
 
@@ -91,5 +108,9 @@ doesn't inspect running processes or memory.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v   # 28 unit tests (includes the 56-check self-test)
+python -m safesweep selftest
 ```
+
+GitHub Actions runs everything on Windows, macOS and Linux with Python 3.9 and 3.13 on every push
+(`.github/workflows/safesweep-tests.yml`).
