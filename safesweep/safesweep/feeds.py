@@ -331,6 +331,7 @@ def _default_fetcher(settings: Settings, cancelled=None) -> Fetcher:
 def update_source(src: Source, settings: Settings, fetch: Fetcher, now: Optional[float] = None) -> dict:
     """Update one source. On any problem the previous data stays in place."""
     now = time.time() if now is None else now
+    ThreatLists.reset()  # Windows can't replace list files while they are open
     d = feeds_dir()
     d.mkdir(parents=True, exist_ok=True)
     meta = read_meta(src)
