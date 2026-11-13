@@ -19,7 +19,14 @@ android.presplash_color = #FFFFFF
 
 # Storage access: Android 11+ uses "All files access" (MANAGE_EXTERNAL_STORAGE);
 # older versions use the classic read/write permissions.
-android.permissions = INTERNET, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, MANAGE_EXTERNAL_STORAGE
+android.permissions = INTERNET, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, MANAGE_EXTERNAL_STORAGE, FOREGROUND_SERVICE, FOREGROUND_SERVICE_DATA_SYNC, POST_NOTIFICATIONS, USE_EXACT_ALARM, SCHEDULE_EXACT_ALARM, RECEIVE_BOOT_COMPLETED, WAKE_LOCK
+# Daily automatic check: background service started by an exact daily alarm; a WorkManager job
+# (survives reboots) re-arms the alarm. Java sources in packaging/android/java.
+services = check:safesweep/android_service.py:foreground:foregroundServiceType=dataSync
+android.enable_androidx = True
+android.gradle_dependencies = androidx.work:work-runtime:2.9.1
+android.add_src = %(source.dir)s/packaging/android/java
+
 android.extra_manifest_application_arguments = %(source.dir)s/packaging/android/manifest_application_args.xml
 
 android.api = 35

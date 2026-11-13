@@ -45,8 +45,27 @@ jobs:
           if (-not $lnk) { throw "no Start menu shortcut" }
           & "$app\safesweep-cli.exe" selftest
           if ($LASTEXITCODE -ne 0) { throw "self-test failed after installing" }
+          & "$app\safesweep-cli.exe" settings --set virusshare_lists=2 | Out-Null
           & "$app\safesweep-cli.exe" update
           if ($LASTEXITCODE -ne 0) { throw "could not download threat lists over verified HTTPS" }
+          # --- the daily automatic check, run by Windows Task Scheduler
+          $task = "SafeSweep Daily Threat Check"
+          schtasks /Query /TN $task /V /FO LIST | Select-String "TaskName|Task To Run|Next Run Time|Schedule Type|Start Time"
+          if ($LASTEXITCODE -ne 0) { throw "the installer did not create the daily check task" }
+          $t = "$env:USERPROFILE\SafeSweepTaskTest"
+          New-Item -ItemType Directory -Force $t | Out-Null
+          [IO.File]::WriteAllText("$t\eicar.com", 'X5O!P%@AP[4\PZX54(P^)7CC)7}$' + 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*')
+          [IO.File]::WriteAllText("$t\notes.txt", "a normal file")
+          & "$app\safesweep-cli.exe" settings --set "scan_paths=$t" | Out-Null
+          schtasks /Run /TN $task
+          for ($i = 0; $i -lt 90 -and (Test-Path "$t\eicar.com"); $i++) { Start-Sleep 2 }
+          if (Test-Path "$t\eicar.com") {
+            schtasks /Query /TN $task /V /FO LIST
+            throw "the scheduled daily check did not run"
+          }
+          if (-not (Test-Path "$t\notes.txt")) { throw "the daily check touched a normal file" }
+          Get-Content (Get-ChildItem "$env:LOCALAPPDATA\SafeSweep\reports\*.txt" | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
+          Write-Host "Task Scheduler ran the silent daily check and it moved the test threat to Review."
           $p = Start-Process "$app\SafeSweep.exe" -PassThru
           Start-Sleep -Seconds 8
           if ($p.HasExited) { throw "the SafeSweep window closed by itself (exit code $($p.ExitCode))" }
@@ -59,6 +78,9 @@ jobs:
           Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
           for ($i = 0; $i -lt 30 -and (Test-Path "$app\SafeSweep.exe"); $i++) { Start-Sleep 1 }
           if (Test-Path "$app\SafeSweep.exe") { throw "uninstall left the program behind" }
+          schtasks /Query /TN "SafeSweep Daily Threat Check" 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "uninstall left the daily check task behind" }
+          $global:LASTEXITCODE = 0
           Write-Host "Installed, ran, and uninstalled cleanly."
       - uses: actions/upload-artifact@v4
         with:

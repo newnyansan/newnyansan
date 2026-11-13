@@ -124,6 +124,43 @@ def cmd_update(args, settings: Settings) -> int:
     return 0 if any(read_meta(s).get("ok") for s in SOURCES) else 1
 
 
+def cmd_auto(args, settings: Settings) -> int:
+    """The scheduled check: never asks anything, notifies only when needed."""
+    from .auto import run_auto
+    from .schedule import notify
+    res = run_auto(settings, (lambda m: print(f"  {m}", file=sys.stderr)) if args.verbose else None,
+                   deep=True if args.deep else None)
+    print(res.headline())
+    print(res.details())
+    if res.report_path:
+        print(f"Report: {res.report_path}")
+    if res.needs_attention and not args.no_notify:
+        notify(res.headline(), res.details())
+    return 1 if res.needs_attention else 0
+
+
+def cmd_schedule(args, settings: Settings) -> int:
+    from . import schedule
+    from .auto import status_text
+    try:
+        if args.action == "on":
+            if args.time:
+                schedule._parse_time(args.time)
+                settings.set_value("auto_check_time", args.time)
+                settings.save()
+            print("Daily automatic check turned on: " + schedule.enable(settings.auto_check_time))
+        elif args.action == "off":
+            print("Daily automatic check turned off (" + schedule.disable() + ").")
+        else:
+            print(f"Daily automatic check: {schedule.status()}")
+    except (RuntimeError, ValueError, OSError) as e:
+        if not args.quiet:
+            print(f"Error: {e}")
+        return 2
+    print(status_text())
+    return 0
+
+
 def cmd_scan(args, settings: Settings) -> int:
     if not args.offline and settings.threat_feeds_enabled:
         _update_lists(settings, False, args.verbose)
@@ -167,6 +204,14 @@ def cmd_review(args, settings: Settings) -> int:
                     print(f"Restored to {rf.restore(i)}")
                 else:
                     print(f"Deleted {i} ({human(rf.delete(i))} freed)")
+        elif args.action == "location":
+            if not args.ids:
+                print(f"Review folder: {rf.root}")
+                print("Change it with: safesweep review location <folder>   (or 'default')")
+                return 0
+            target = None if args.ids[0].lower() == "default" else args.ids[0]
+            n, new_root = rf.relocate(target)
+            print(f"Review folder is now {new_root} ({n} item(s) moved, all verified).")
         elif args.action == "purge":
             days = settings.review_retention_days if args.expired else None
             what = f"items older than {days} days" if days else "ALL items"
@@ -174,7 +219,7 @@ def cmd_review(args, settings: Settings) -> int:
                 return 0
             n, freed = rf.purge(days)
             print(f"Permanently deleted {n} item(s), {human(freed)} freed.")
-    except (ReviewError, OSError, KeyError) as e:
+    except (ReviewError, OSError, KeyError, ValueError) as e:
         print(f"Error: {e}")
         return 2
     return 0
@@ -186,6 +231,9 @@ def cmd_settings(args, settings: Settings) -> int:
             key, sep, val = kv.partition("=")
             if not sep:
                 print(f"Use KEY=VALUE, got {kv!r}")
+                return 2
+            if key.strip() == "review_folder":
+                print("To move the Review folder (and the items in it) use: safesweep review location <folder>")
                 return 2
             try:
                 settings.set_value(key.strip(), val)
@@ -219,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             sp.add_argument("--offline", action="store_true", help="don't refresh the online threat lists first")
 
     rv = sub.add_parser("review", help="manage the Review folder")
-    rv.add_argument("action", choices=["list", "restore", "delete", "purge"])
+    rv.add_argument("action", choices=["list", "restore", "delete", "purge", "location"])
     rv.add_argument("ids", nargs="*")
     rv.add_argument("--expired", action="store_true", help="purge only items past review_retention_days")
     rv.add_argument("-y", "--yes", action="store_true")
@@ -231,6 +279,14 @@ def main(argv: list[str] | None = None) -> int:
     sg.add_argument("action", choices=["add"])
     sg.add_argument("file")
 
+    au = sub.add_parser("auto", help="run the automatic check now (what the daily schedule runs)")
+    au.add_argument("--deep", action="store_true", help="re-read every file instead of only new/changed ones")
+    au.add_argument("--no-notify", action="store_true")
+    au.add_argument("-v", "--verbose", action="store_true")
+    sc = sub.add_parser("schedule", help="turn the daily automatic check on or off")
+    sc.add_argument("action", choices=["on", "off", "status"])
+    sc.add_argument("--time", help="time of day, e.g. 12:30 (default from settings)")
+    sc.add_argument("--quiet", action="store_true")
     up = sub.add_parser("update", help="download the latest threat lists from verified sources now")
     up.add_argument("-v", "--verbose", action="store_true")
     sub.add_parser("selftest", help="check that detection and the Review folder work correctly on this device")
@@ -259,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return 0
     return {"scan": cmd_scan, "clean": cmd_clean, "review": cmd_review, "update": cmd_update,
+            "auto": cmd_auto, "schedule": cmd_schedule,
             "settings": cmd_settings}[args.command](args, settings)
 
 

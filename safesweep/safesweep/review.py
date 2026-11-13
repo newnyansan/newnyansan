@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Optional
 
-from .config import Settings, app_home, is_protected, path_is_within
+from .config import Settings, app_home, is_android, is_protected, path_is_within
 from .models import Finding, files_identical, sha256_of
 
 MANIFEST = "manifest.json"
@@ -258,6 +258,62 @@ class ReviewFolder:
         for n in notes:
             _log("repair: " + n)
         return notes
+
+    def relocate(self, new_parent: Optional[str]) -> tuple[int, Path]:
+        """Move the whole Review folder to `new_parent`/SafeSweep Review (None = default place).
+
+        Everything is copied and verified first; only then is the setting switched and the old
+        copies removed. If anything goes wrong, the old folder stays exactly as it was.
+        """
+        target = self.settings.check_review_location(new_parent)
+        if os.path.normcase(os.path.abspath(target)) == os.path.normcase(os.path.abspath(self.root)):
+            return 0, self.root
+        new_files = target / "files"
+        if new_files.exists() and any(new_files.iterdir()):
+            raise ReviewError(f"{target} already contains a Review folder with items - pick another place")
+        created = not target.exists()
+        copied: list[Path] = []
+        with self._locked():
+            items = self._load()
+            try:
+                new_files.mkdir(parents=True, exist_ok=True)
+                for item in items.values():
+                    src = self.stored_path(item)
+                    if not src.exists():
+                        continue
+                    dst = new_files / item.stored_name
+                    shutil.copy2(src, dst)
+                    copied.append(dst)
+                    if sha256_of(str(dst)) != sha256_of(str(src)):
+                        raise ReviewError(f"verification failed for {item.stored_name}")
+                data = json.dumps({k: asdict(v) for k, v in items.items()}, indent=2)
+                (target / MANIFEST).write_text(data, encoding="utf-8")
+                if is_android():
+                    (target / ".nomedia").touch()
+            except BaseException:
+                for c in copied:
+                    with contextlib.suppress(OSError):
+                        c.unlink()
+                if created:
+                    shutil.rmtree(target, ignore_errors=True)
+                raise
+            old_root, old_files = self.root, self.files
+            self.settings.review_folder = os.path.abspath(os.path.expanduser(new_parent)) if new_parent else ""
+            self.settings.save()
+            for item in items.values():
+                with contextlib.suppress(OSError):
+                    (old_files / item.stored_name).unlink()
+            for name in (MANIFEST, MANIFEST + ".bak", MANIFEST.replace(".json", ".tmp")):
+                with contextlib.suppress(OSError):
+                    (old_root / name).unlink()
+        with contextlib.suppress(OSError):
+            (old_root / "lock").unlink()
+        for d in (old_files, old_root):
+            with contextlib.suppress(OSError):
+                d.rmdir()  # only removed if empty - never deletes anything unexpected
+        _log(f"Review folder moved from {old_root} to {target} ({len(copied)} item(s))")
+        self.__init__(self.settings)
+        return len(copied), self.root
 
     def items(self) -> list[ReviewItem]:
         return sorted((i for i in self._load().values() if i.status == "ok"),

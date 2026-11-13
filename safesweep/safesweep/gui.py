@@ -23,6 +23,13 @@ def _human(n: float) -> str:
     return f"{n:.1f} TB"
 
 
+def _reports_dir():
+    from .config import app_home
+    d = app_home() / "reports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _open_folder(path: str) -> None:
     try:
         if sys.platform.startswith("win"):
@@ -382,6 +389,39 @@ def run() -> int:
             refresh_review()
             status.set(f"Deleted {n} expired item(s), freed {_human(freed)}.")
 
+    folder_var = tk.StringVar(value=f"Folder: {review.files.parent}")
+    floc = ttk.Frame(rframe)
+    floc.pack(side="top", fill="x", pady=(0, 6), before=rside)
+    ttk.Label(floc, textvariable=folder_var, foreground="#555").pack(side="left")
+
+    def change_folder():
+        d = filedialog.askdirectory(title="Where should the Review folder be?")
+        if not d:
+            return
+        try:
+            target = settings.check_review_location(d)
+        except ValueError as e:
+            messagebox.showwarning("SafeSweep", str(e))
+            return
+        n = len(review.items())
+        if not messagebox.askyesno("Move the Review folder?",
+                                   f"The Review folder will be:\n{target}\n\n{n} item(s) waiting there will be copied, "
+                                   "checked, and only then removed from the old place. Continue?"):
+            return
+        status.set("Moving the Review folder…")
+
+        def done(res, exc):
+            if exc:
+                messagebox.showerror("Could not move the Review folder", f"{exc}\n\nNothing was changed.")
+                status.set("Review folder unchanged.")
+                return
+            folder_var.set(f"Folder: {res[1]}")
+            refresh_review()
+            status.set(f"Review folder moved to {res[1]} ({res[0]} item(s), all verified).")
+
+        in_background(lambda: review.relocate(d), done)
+
+    ttk.Button(floc, text="Change folder…", command=change_folder).pack(side="right", before=floc.winfo_children()[0])
     ttk.Label(rside, textvariable=total_var, justify="center").pack(pady=(0, 8))
     ttk.Button(rside, text="Restore", command=do_restore).pack(fill="x", pady=2)
     ttk.Button(rside, text="Delete selected", command=do_delete).pack(fill="x", pady=2)
@@ -417,9 +457,58 @@ def run() -> int:
         in_background(work, done)
 
     menubar = tk.Menu(root)
+    automenu = tk.Menu(menubar, tearoff=0)
+    auto_on = tk.BooleanVar(value=False)
+
+    def load_auto_state():
+        from . import schedule
+        try:
+            auto_on.set(schedule.status().startswith("on"))
+        except Exception:
+            auto_on.set(False)
+
+    def toggle_auto():
+        from . import schedule
+        want = auto_on.get()
+        try:
+            msg = schedule.enable(settings.auto_check_time) if want else "turned off (" + schedule.disable() + ")"
+            status.set(f"Daily automatic check: {msg}")
+            if want:
+                messagebox.showinfo("Daily automatic check",
+                                    f"SafeSweep will check for threats every day at {settings.auto_check_time} "
+                                    "(or as soon as the PC is on, if it was off), without asking.\n\n"
+                                    "Confirmed threats are moved to the Review folder - nothing is deleted. "
+                                    "You get a notification only when something is found.")
+        except Exception as e:
+            auto_on.set(not want)
+            messagebox.showerror("Daily automatic check", str(e))
+
+    def run_auto_now():
+        status.set("Running the automatic check…")
+
+        def work():
+            from .auto import run_auto
+            return run_auto(settings, lambda m: events.put(("status", m)))
+
+        def done(res, exc):
+            refresh_review()
+            if exc:
+                messagebox.showerror("Automatic check", str(exc))
+                return
+            status.set(res.headline())
+            messagebox.showinfo("Automatic check", res.headline() + "\n\n" + res.details())
+
+        in_background(work, done)
+
+    automenu.add_checkbutton(label="Check for threats automatically every day", variable=auto_on,
+                             command=toggle_auto)
+    automenu.add_command(label="Run the automatic check now", command=run_auto_now)
+    automenu.add_command(label="Open reports", command=lambda: _open_folder(str(_reports_dir())))
+    menubar.add_cascade(label="Automatic", menu=automenu)
+    load_auto_state()
     helpmenu = tk.Menu(menubar, tearoff=0)
     helpmenu.add_command(label="Run self-test (checks SafeSweep works correctly here)", command=selftest)
-    helpmenu.add_command(label="Open activity log", command=lambda: _open_folder(str(review.root.parent)))
+    helpmenu.add_command(label="Open activity log", command=lambda: _open_folder(str(_reports_dir().parent)))
     menubar.add_cascade(label="Help", menu=helpmenu)
     root.config(menu=menubar)
 

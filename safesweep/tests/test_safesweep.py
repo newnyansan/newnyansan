@@ -409,6 +409,41 @@ class FeedSecurityTests(Base):
             idx.close()
 
 
+class ScheduleTests(Base):
+    def test_windows_task_definition(self):
+        import xml.etree.ElementTree as ET
+        from safesweep import schedule
+        xml = schedule.windows_task_xml(12, 30, [r"C:\Users\Me\AppData\Local\Programs\SafeSweep\SafeSweep.exe",
+                                                 "--auto"], "PC\\Me")
+        root = ET.fromstring(xml.encode("utf-16"))
+        ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+        get = lambda path: root.find(path, ns).text
+        self.assertEqual(get("t:Settings/t:StartWhenAvailable"), "true")        # catches up missed runs
+        self.assertEqual(get("t:Settings/t:DisallowStartIfOnBatteries"), "false")
+        self.assertEqual(get("t:Principals/t:Principal/t:RunLevel"), "LeastPrivilege")  # no admin rights
+        self.assertEqual(get("t:Triggers/t:CalendarTrigger/t:ScheduleByDay/t:DaysInterval"), "1")  # daily
+        self.assertTrue(get("t:Triggers/t:CalendarTrigger/t:StartBoundary").endswith("T12:30:00"))
+        self.assertEqual(get("t:Actions/t:Exec/t:Arguments"), "--auto")
+
+    def test_linux_and_mac_definitions(self):
+        import plistlib
+        from safesweep import schedule
+        service, timer = schedule.systemd_units(7, 5, ["/usr/bin/python3", "-m", "safesweep", "auto"])
+        self.assertIn("OnCalendar=*-*-* 07:05:00", timer)
+        self.assertIn("Persistent=true", timer)
+        self.assertIn("ExecStart=/usr/bin/python3 -m safesweep auto", service)
+        plist = plistlib.loads(schedule.launchd_plist(7, 5, ["/usr/bin/python3", "-m", "safesweep", "auto"]).encode())
+        self.assertEqual(plist["StartCalendarInterval"], {"Hour": 7, "Minute": 5})
+        self.assertEqual(plist["ProgramArguments"][-1], "auto")
+
+    def test_time_validation(self):
+        from safesweep import schedule
+        self.assertEqual(schedule._parse_time("09:05"), (9, 5))
+        for bad in ("25:00", "9", "12:60", "noon"):
+            with self.assertRaises(ValueError):
+                schedule._parse_time(bad)
+
+
 class CliTests(Base):
     def run_cli(self, *args, stdin=""):
         env = dict(os.environ, PYTHONPATH=str(PKG_DIR))
@@ -457,6 +492,28 @@ class CliTests(Base):
         r = self.run_cli("settings", "--set", "nope=1")
         self.assertEqual(r.returncode, 2)
         self.assertIn("Unknown setting", r.stdout)
+
+    def test_auto_command_and_review_location(self):
+        from safesweep.scanner import EICAR
+        self.write("e.com", EICAR)
+        self.write("fine.txt", b"ok")
+        self.run_cli("settings", "--set", f"scan_paths={self.data}", "use_clamav=false", "threat_feeds_enabled=false")
+        r = self.run_cli("auto", "--no-notify")
+        self.assertEqual(r.returncode, 1, r.stdout)  # 1 = something needed attention
+        self.assertIn("moved 1 threat", r.stdout)
+        self.assertFalse((self.data / "e.com").exists())
+        r = self.run_cli("auto", "--no-notify")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        other = self.base / "elsewhere"
+        other.mkdir()
+        r = self.run_cli("review", "location", str(other))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(any((other / "SafeSweep Review" / "files").iterdir()))
+        r = self.run_cli("review", "location", str(self.base / "nope"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not found", r.stdout)
+        r = self.run_cli("settings", "--set", f"review_folder={other}")
+        self.assertEqual(r.returncode, 2)
 
     def test_selftest_command(self):
         r = self.run_cli("selftest")

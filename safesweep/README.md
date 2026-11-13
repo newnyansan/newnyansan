@@ -15,29 +15,58 @@ A cautious **virus scanner + junk cleaner** for PC (Windows, macOS, Linux) and A
 | 📂 **Review Folder** | Flagged files are moved here, not deleted. Threats get a `.quarantined` suffix and lose execute permission. Restore puts files back exactly where they were (never overwriting anything) with their original permissions. Optional auto-delete after 30 days. |
 | 🧪 **Self-test** | `safesweep selftest` (or *Help → Run self-test*) builds a sandbox with 50+ tricky cases - real threat patterns, harmless look-alikes, junk vs. important files, crash scenarios - and proves everything behaves correctly **on your device**. |
 
+## Automatic daily check (no prompts)
+
+SafeSweep checks for threats **every day on its own** - you don't need to open it or approve anything.
+
+| | How it runs | Turn on/off |
+|---|---|---|
+| **Windows** | Task Scheduler, every day at 12:30 (or as soon as the PC is on if it was off); no window, no admin rights | Installer option (on by default), menu **Automatic**, or `safesweep schedule on/off` |
+| **Android** | Exact daily alarm + a background job that survives restarts; catches up if the phone was off | Switch on the Scan screen (on by default) |
+| **macOS / Linux** | launchd agent / systemd user timer | `safesweep schedule on/off` |
+
+Each run: refreshes the threat lists → scans your scan folders (only new or changed files are read;
+everything is re-read once a week) → **moves confirmed, high-confidence threats to the Review folder**
+→ writes a report (`reports/` in SafeSweep's data folder) → **notifies you only if something was found**.
+Nothing is ever deleted automatically and junk cleaning stays manual.
+
+**Why daily, not weekly:** the abuse.ch "recent" lists only cover the last 48 hours, so a weekly check
+would miss most new samples.
+
+Change the time with `safesweep schedule on --time 08:15`; run a check right now with `safesweep auto`.
+
+## Choosing where the Review folder is
+
+By default it lives in SafeSweep's data folder. Pick another place - e.g. *Documents*, another drive,
+or an SD card on Android - with **Change folder…** (Review tab), the location picker on the phone's
+Review screen, or `safesweep review location <folder>` (`default` to go back).
+
+- SafeSweep creates a dedicated `SafeSweep Review` folder inside the place you pick.
+- Items already waiting are **copied and verified first**; only then are the old copies removed.
+  If anything fails, nothing changes.
+- The Review folder is never scanned, wherever you put it (no "finding" the quarantined threats again).
+- System and program folders are refused.
+
 ## Online threat lists (verified sources only)
 
-SafeSweep downloads lists of **confirmed malware fingerprints** (SHA-256) and checks every scanned file
-against them - viruses, trojans, ransomware, info-stealers, banking malware, etc.
+SafeSweep checks every scanned file's fingerprint against lists of **confirmed malware** - viruses,
+trojans, ransomware, info-stealers, etc. Only these built-in sources are used, only over verified HTTPS:
 
-| Source | What it is |
-|---|---|
-| [MalwareBazaar](https://bazaar.abuse.ch) by abuse.ch | Malware samples submitted and confirmed by security researchers, with the malware family name (e.g. *AgentTesla*, *Lumma Stealer*). |
-| [ThreatFox](https://threatfox.abuse.ch) by abuse.ch | File fingerprints from incident responders; only entries with confidence ≥ 50% are used. |
-| [ClamAV](https://www.clamav.net) official definitions | Updated with `freshclam` when ClamAV is installed. |
+| Source | What it is | Key needed? |
+|---|---|---|
+| [MalwareBazaar](https://bazaar.abuse.ch) by abuse.ch | Malware confirmed by security researchers, updated continuously, with family names (e.g. *AgentTesla*) | **Free Auth-Key** |
+| [ThreatFox](https://threatfox.abuse.ch) by abuse.ch | File fingerprints from incident responders (confidence ≥ 50% only) | **Free Auth-Key** |
+| [VirusShare](https://virusshare.com) | Large archive of known malware (MD5 lists; the newest 16 lists ≈ 1 million samples). No new lists since 2022, so it covers older malware | No |
+| [ClamAV](https://www.clamav.net) official definitions | Updated daily with `freshclam` when ClamAV is installed | No |
 
-- Updated automatically before a scan when older than 24 h (`threat_feed_update_hours`), or any
-  time with **Update threat lists** / `safesweep update`. A scan never waits on a broken connection:
-  it just uses the lists you already have (`safesweep scan --offline` skips the update).
-- **Only those sources, only over verified HTTPS.** The addresses are built in; certificates are
-  checked; redirects to any other host, oversized downloads, web/error pages and lists without valid
-  entries are rejected - and a failed update never replaces the lists you already have.
-- Lists **build up over time** (each update adds the newest samples; entries expire after a year).
-  `threat_feed_full=true` also downloads the complete MalwareBazaar archive (large).
-- Fingerprints of harmless content (like an empty file) are ignored even if a list contains them,
-  so they can't cause false alarms. A match is an exact, byte-for-byte copy of a confirmed sample.
-- If abuse.ch ever requires their free Auth-Key, get one at <https://auth.abuse.ch> and run
-  `safesweep settings --set abusech_auth_key=YOUR_KEY`.
+**Get the daily-updated abuse.ch lists (recommended):** abuse.ch requires a free personal key for downloads.
+Sign in at <https://auth.abuse.ch>, copy your Auth-Key, then run
+`safesweep settings --set abusech_auth_key=YOUR_KEY` (the key is never printed or written into logs).
+
+- Lists refresh automatically (daily; VirusShare weekly) and build up over time; abuse.ch entries expire after a year.
+- Certificates are verified; redirects to other hosts, oversized downloads, web/error pages and empty
+  lists are rejected. **A failed update never replaces the lists you already have.**
+- Fingerprints of harmless content (e.g. an empty file) are ignored even if a list contains them.
 
 ## Safety rules (why it doesn't misfire)
 
@@ -121,6 +150,9 @@ safesweep clean ~/Downloads -y      # move the recommended (✓) items to Review
 safesweep clean ~/Downloads -y --all  # ...or everything found
 safesweep selftest                  # prove it works correctly on this device
 safesweep update                    # download the latest threat lists now
+safesweep auto                      # run the automatic check now (what the daily schedule runs)
+safesweep schedule on|off|status    # the daily automatic check
+safesweep review location D:\Quarantine   # move the Review folder (and its items) somewhere else
 
 safesweep review list               # see what's waiting
 safesweep review restore <id>       # put it back
@@ -178,7 +210,7 @@ doesn't inspect running processes or memory.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v   # 34 unit tests (includes the 70-check self-test)
+python -m unittest discover -s tests -v   # 38 unit tests (includes the 90-check self-test)
 python -m safesweep selftest
 ```
 

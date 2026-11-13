@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Settings, app_home, is_protected
-from .models import (SEVERITY_ORDER, CancelFn, FileInfo, Finding, ProgressFn, sha256_of,
+from .models import (SEVERITY_ORDER, CancelFn, FileInfo, Finding, ProgressFn, hashes_of, sha256_of,
                      walk_files)
 
 BUILTIN_SIGS = Path(__file__).with_name("data") / "signatures.txt"
@@ -223,60 +223,130 @@ def clamav_scan(files: list[str], settings: Settings, stats: dict,
     return findings
 
 
+# ---------------------------------------------------------------- fingerprint memory
+CACHE_VERSION = 2
+
+
+def _cache_key(st, settings: Settings) -> str:
+    # ctime / inode can't be set back by ordinary programs, so a modified file always looks new.
+    ctime = getattr(st, "st_ctime_ns", 0) if os.name != "nt" else getattr(st, "st_birthtime_ns", 0) or 0
+    return f"{st.st_size}:{st.st_mtime_ns}:{ctime}:{st.st_ino}:{int(settings.report_macros)}:{settings.max_hash_mb}"
+
+
+def load_hash_cache() -> dict:
+    p = app_home() / "hash-cache.json"
+    try:
+        import json
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if data.get("v") == CACHE_VERSION and isinstance(data.get("files"), dict):
+            return data["files"]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {}
+
+
+def save_hash_cache(cache: dict) -> None:
+    import json
+    p = app_home() / "hash-cache.json"
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"v": CACHE_VERSION, "files": cache}, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def _analyze(info: FileInfo, settings: Settings, max_hash: int, want_hash: bool,
+             cancelled: Optional[CancelFn]) -> Optional[tuple[str, list, str]]:
+    """Read one file: (sha256 or "", heuristic hits, md5 or ""). None if unreadable."""
+    st = info.st
+    try:
+        with open(info.path, "rb") as f:
+            head = f.read(64 * 1024)
+    except OSError:
+        return None
+    hits: list = []
+    if is_eicar(head, st.st_size):
+        hits.append(["EICAR antivirus test file (harmless, used to test scanners)", "high", True])
+    else:
+        hits.extend([list(h) for h in heuristic_checks(info, head, settings.report_macros)])
+    digest = md5 = ""
+    if want_hash and 0 < st.st_size <= max_hash:
+        try:
+            digest, md5 = hashes_of(info.path, cancelled=cancelled)
+        except OSError:
+            digest = md5 = ""
+    return digest, hits, md5
+
+
 # ---------------------------------------------------------------- main entry
 def scan(settings: Settings, paths: Optional[list[str]] = None,
          progress: Optional[ProgressFn] = None,
          cancelled: Optional[CancelFn] = None,
-         stats: Optional[dict] = None) -> list[Finding]:
+         stats: Optional[dict] = None,
+         cache: Optional[dict] = None,
+         clamav_changed_only: bool = False) -> list[Finding]:
+    """Scan files. With `cache`, unchanged files are not read again (their fingerprint and
+    verdict are remembered); the threat lists are still checked against every file."""
     stats = stats if stats is not None else {}
-    roots = paths or settings.scan_paths
+    roots = [os.path.abspath(os.path.expanduser(r)) for r in (paths or settings.scan_paths)]
     sigs = load_signatures()
+    settings.review_dir  # make sure the Review folder is never scanned, wherever it is
     from .feeds import ThreatLists
     lists = ThreatLists.get() if settings.threat_feeds_enabled else None
     max_hash = settings.max_hash_mb * 1024 * 1024
     findings: dict[str, Finding] = {}
     scanned: list[str] = []
+    changed: list[str] = []
+    seen: set = set()
+    stats.setdefault("cached", 0)
 
     for info in walk_files(roots, settings.exclude, progress, cancelled, stats=stats):
         st = info.st
-        try:
-            with open(info.path, "rb") as f:
-                head = f.read(64 * 1024)
-        except OSError:
-            stats["unreadable"] = stats.get("unreadable", 0) + 1
-            continue
-        scanned.append(info.path)
-
-        if is_eicar(head, st.st_size):
-            findings[info.path] = Finding(info.path, "threat", "EICAR antivirus test file (harmless, used to test scanners)",
-                                          "high", st.st_size, True, st.st_mtime_ns)
-            continue
-
-        if (sigs or lists) and 0 < st.st_size <= max_hash:
+        seen.add(info.path)
+        key = _cache_key(st, settings) if cache is not None else ""
+        entry = cache.get(info.path) if cache is not None else None
+        if entry and len(entry) == 4 and entry[0] == key:
+            digest, hits, md5 = entry[1], entry[2], entry[3]
+            stats["cached"] += 1
+        else:
             try:
-                digest = sha256_of(info.path, cancelled=cancelled)
+                result = _analyze(info, settings, max_hash, True, cancelled)
             except InterruptedError:
                 break
-            except OSError:
-                digest = ""
-            known = sigs.get(digest) if digest else None
-            if digest and not known and lists:
-                known = lists.lookup(digest)
-            if known:
-                findings[info.path] = Finding(info.path, "threat", f"Known malware - {known}", "high",
-                                              st.st_size, True, st.st_mtime_ns, {"sha256": digest})
+            if result is None:
+                stats["unreadable"] = stats.get("unreadable", 0) + 1
                 continue
+            digest, hits, md5 = result
+            changed.append(info.path)
+            if cache is not None:
+                cache[info.path] = [key, digest, hits, md5]
+        scanned.append(info.path)
 
-        hits = heuristic_checks(info, head, settings.report_macros)
+        known = sigs.get(digest) if digest else None
+        if digest and not known and lists:
+            known = lists.lookup(digest, md5)
+        if known:
+            findings[info.path] = Finding(info.path, "threat", f"Known malware - {known}", "high",
+                                          st.st_size, True, st.st_mtime_ns, {"sha256": digest})
+            continue
         if hits:
-            sev = min((s for _, s, _ in hits), key=SEVERITY_ORDER.__getitem__)
-            findings[info.path] = Finding(info.path, "threat", "; ".join(r for r, _, _ in hits), sev,
-                                          st.st_size, any(rec for _, _, rec in hits), st.st_mtime_ns)
+            sev = min((h[1] for h in hits), key=SEVERITY_ORDER.__getitem__)
+            findings[info.path] = Finding(info.path, "threat", "; ".join(h[0] for h in hits), sev,
+                                          st.st_size, any(h[2] for h in hits), st.st_mtime_ns)
+
+    if cache is not None and not (cancelled and cancelled()):
+        # forget files under the scanned folders that no longer exist
+        from .config import path_is_within
+        for p in [p for p in cache if p not in seen and any(path_is_within(p, r) for r in roots)]:
+            del cache[p]
 
     if cancelled and cancelled():
         stats["cancelled"] = True
     elif settings.use_clamav:
-        for f in clamav_scan(scanned, settings, stats, progress):
+        targets = changed if clamav_changed_only else scanned
+        for f in clamav_scan(targets, settings, stats, progress):
             prev = findings.get(f.path)
             if prev and prev.reason != f.reason:
                 f.reason = f"{f.reason}; {prev.reason}"
@@ -285,5 +355,6 @@ def scan(settings: Settings, paths: Optional[list[str]] = None,
         stats["clamav"] = "turned off"
     if lists is not None:
         stats["threat_lists"] = sum(idx.count for _, idx in lists.indexes)
+    stats["changed"] = len(changed)
 
     return sorted(findings.values(), key=lambda f: (SEVERITY_ORDER[f.severity], f.path))

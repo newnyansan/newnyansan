@@ -28,19 +28,24 @@ ArchitecturesInstallIn64BitMode=x64compatible
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
+Name: "autocheck"; Description: "Check for threats &automatically every day (recommended)"; GroupDescription: "Protection:"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
 
 [Files]
 Source: "..\..\dist\SafeSweep\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\SafeSweep"; Filename: "{app}\SafeSweep.exe"
+Name: "{group}\SafeSweep"; Filename: "{app}\SafeSweep.exe"; AppUserModelID: "SafeSweep.App"
 Name: "{group}\SafeSweep self-test"; Filename: "{app}\safesweep-cli.exe"; Parameters: "selftest"
 Name: "{group}\Uninstall SafeSweep"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\SafeSweep"; Filename: "{app}\SafeSweep.exe"; Tasks: desktopicon
 
 [Run]
+Filename: "{app}\safesweep-cli.exe"; Parameters: "schedule on --quiet"; Flags: runhidden; Tasks: autocheck
 Filename: "{app}\SafeSweep.exe"; Description: "Start SafeSweep now"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "{app}\safesweep-cli.exe"; Parameters: "schedule off --quiet"; Flags: runhidden; RunOnceId: "RemoveDailyCheck"
 
 ; Your settings and the Review folder (%LOCALAPPDATA%\SafeSweep) are kept on uninstall,
 ; so nothing waiting in review is lost. Delete that folder yourself if you want it gone.

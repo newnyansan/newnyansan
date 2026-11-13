@@ -39,6 +39,18 @@ def sha256_of(path: str, chunk: int = 1 << 20, cancelled: Optional[CancelFn] = N
     return h.hexdigest()
 
 
+def hashes_of(path: str, chunk: int = 1 << 20, cancelled: Optional[CancelFn] = None) -> tuple[str, str]:
+    """(sha256, md5) computed in one pass over the file."""
+    sha, md5 = hashlib.sha256(), hashlib.md5()
+    with open(path, "rb") as f:
+        while block := f.read(chunk):
+            sha.update(block)
+            md5.update(block)
+            if cancelled and cancelled():
+                raise InterruptedError("cancelled")
+    return sha.hexdigest(), md5.hexdigest()
+
+
 def files_identical(a: str, b: str, chunk: int = 1 << 20) -> bool:
     """Byte-by-byte comparison (no reliance on hashes)."""
     try:

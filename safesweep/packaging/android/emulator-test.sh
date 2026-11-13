@@ -58,6 +58,27 @@ check "files were moved to the Review folder"  "AUTOTEST moved=2 errors=\[\]"
 check "Review folder lists them"               "AUTOTEST review items=2"
 check "finished"                               "AUTOTEST done"
 check "threat lists downloaded on the phone (verified HTTPS)" "AUTOTEST feeds Online threat lists: [0-9,]+ known"
+# --- the automatic daily check, started in the background by the real alarm
+echo "Sending the app to the background; waiting for the alarm-started daily check…"
+adb shell input keyevent KEYCODE_HOME
+for i in $(seq 1 60); do
+  sleep 3
+  if adb logcat -d | grep -q "AUTOCHECK"; then break; fi
+done
+sleep 3
+adb exec-out screencap -p > "$OUT/10-after-background-check.png"
+adb logcat -d > "$OUT/logcat.txt"
+adb shell dumpsys notification --noredact > "$OUT/notifications.txt" 2>/dev/null || adb shell dumpsys notification > "$OUT/notifications.txt"
+adb shell dumpsys jobscheduler > "$OUT/jobs.txt"
+adb shell dumpsys alarm > "$OUT/alarms.txt"
+grep -E "AUTOCHECK|service_check|ServiceCheck" "$OUT/logcat.txt" | tail -20
+check "daily check was switched on automatically"           "AUTOTEST daily Daily check on"
+check "background daily check ran from the alarm"           "AUTOCHECK SafeSweep moved"
+if adb shell ls /sdcard/Download | grep -q "eicar.com"; then echo "FAIL  background check left the threat in place"; fail=1; else echo "PASS  background check moved the threat to Review"; fi
+if grep -q "SafeSweep moved" "$OUT/notifications.txt"; then echo "PASS  result notification shown"; else echo "FAIL  no result notification"; fail=1; fi
+if grep -q "org.safesweep.safesweep" "$OUT/jobs.txt"; then echo "PASS  reboot-proof WorkManager job registered"; else echo "FAIL  no WorkManager job"; fail=1; fi
+if grep -q "org.safesweep.safesweep" "$OUT/alarms.txt"; then echo "PASS  next daily alarm is set"; else echo "FAIL  no daily alarm set"; fail=1; fi
+
 if grep -q "Traceback" "$OUT/logcat.txt"; then echo "FAIL  Python error in log"; fail=1; fi
 adb shell pidof "$PKG" >/dev/null && echo "PASS  app still running" || { echo "FAIL  app is not running"; fail=1; }
 echo "Files left in Download:"; adb shell ls /sdcard/Download

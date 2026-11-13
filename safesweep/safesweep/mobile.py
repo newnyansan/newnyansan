@@ -7,6 +7,7 @@ with `pip install kivy` and `python main.py`.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
@@ -63,6 +64,82 @@ def _android_intent_extra(name: str) -> str | None:
         return intent.getStringExtra(name) if intent else None
     except Exception:
         return None
+
+
+def _context():
+    from jnius import autoclass  # type: ignore
+    act = autoclass("org.kivy.android.PythonActivity").mActivity
+    return act if act is not None else autoclass("org.kivy.android.PythonService").mService
+
+
+def daily_check_set(enabled: bool, at: str = "12:30") -> str:
+    """Turn the automatic daily check on/off. Android: exact alarm + WorkManager; desktop: OS scheduler."""
+    if is_android_app():
+        from jnius import autoclass  # type: ignore
+        daily = autoclass("org.safesweep.safesweep.DailyCheck")
+        if enabled:
+            h, m = (int(x) for x in at.split(":"))
+            daily.enable(_context(), h, m)
+        else:
+            daily.disable(_context())
+        return "on" if enabled else "off"
+    from . import schedule
+    return schedule.enable(at) if enabled else schedule.disable()
+
+
+def daily_check_info() -> str:
+    from .auto import read_state
+    fmt = lambda t: time.strftime("%a %H:%M", time.localtime(t))
+    if is_android_app():
+        try:
+            from jnius import autoclass  # type: ignore
+            daily = autoclass("org.safesweep.safesweep.DailyCheck")
+            ctx = _context()
+            if not daily.isEnabled(ctx):
+                return "Daily automatic check is off"
+            nxt, last = daily.getNextRun(ctx) / 1000.0, daily.getLastRun(ctx) / 1000.0
+            return f"Daily check on - next {fmt(nxt) if nxt else '?'}" + (f", last {fmt(last)}" if last else "")
+        except Exception as e:
+            return f"Daily check: unavailable ({e})"
+    from . import schedule
+    try:
+        state = schedule.status()
+    except Exception:
+        state = "off"
+    if not state.startswith("on"):
+        return "Daily automatic check is off"
+    st = read_state()
+    return "Daily check on" + (f" - last run {fmt(st['last_run'])}" if st.get("last_run") else "")
+
+
+def ask_notification_permission() -> None:
+    if not is_android_app():
+        return
+    try:
+        if _sdk_int() >= 33:
+            from android.permissions import request_permissions  # type: ignore
+            request_permissions(["android.permission.POST_NOTIFICATIONS"])
+    except Exception:
+        pass
+
+
+def review_location_choices() -> dict:
+    """Places the Review folder can live (label -> parent folder, None = default)."""
+    shared = android_shared_storage() if is_android_app() else None
+    if shared:
+        opts = {"Phone storage (default)": None,
+                "Documents": str(shared / "Documents"),
+                "Download": str(shared / "Download")}
+        try:
+            for d in Path("/storage").iterdir():  # SD cards look like /storage/1A2B-3C4D
+                if re.fullmatch(r"[0-9A-F]{4}-[0-9A-F]{4}", d.name) and os.access(d, os.W_OK):
+                    opts[f"SD card ({d.name})"] = str(d)
+        except OSError:
+            pass
+        return {k: v for k, v in opts.items() if v is None or os.path.isdir(v)}
+    home = Path.home()
+    opts = {"Default": None, "Documents": str(home / "Documents"), "Desktop": str(home / "Desktop")}
+    return {k: v for k, v in opts.items() if v is None or os.path.isdir(v)}
 
 
 def prepare_environment() -> None:
@@ -260,6 +337,24 @@ KV = r"""
                 on_release: root.update_lists()
         BoxLayout:
             size_hint_y: None
+            height: dp(36) if root.is_scan else 0
+            opacity: 1 if root.is_scan else 0
+            disabled: not root.is_scan
+            spacing: dp(8)
+            Label:
+                text: root.daily_info
+                color: INK
+                font_size: '12sp'
+                text_size: self.size
+                halign: 'left'
+                valign: 'middle'
+            Switch:
+                size_hint_x: None
+                width: dp(80)
+                active: root.daily_on
+                on_active: root.set_daily(self.active)
+        BoxLayout:
+            size_hint_y: None
             height: dp(48)
             spacing: dp(8)
             Spinner:
@@ -314,7 +409,29 @@ KV = r"""
         padding: dp(12), dp(10)
         spacing: dp(8)
         Muted:
-            text: 'Files wait here until you decide. [b]Restore[/b] puts a file back exactly where it was. [b]Delete[/b] removes it for good. Folder: ' + root.folder
+            text: 'Files wait here until you decide. [b]Restore[/b] puts a file back exactly where it was. [b]Delete[/b] removes it for good.'
+        BoxLayout:
+            size_hint_y: None
+            height: dp(44)
+            spacing: dp(8)
+            Label:
+                text: 'Review folder:'
+                color: INK
+                font_size: '13sp'
+                size_hint_x: None
+                width: self.texture_size[0]
+            Spinner:
+                id: loc
+                text: root.location_label
+                values: root.location_choices
+                background_normal: ''
+                background_color: (0.90, 0.92, 0.93, 1)
+                color: INK
+                font_size: '13sp'
+                on_text: root.choose_location(self.text)
+        Muted:
+            text: root.folder
+            font_size: '11sp'
         Ink:
             text: root.summary
             font_size: '14sp'
@@ -543,11 +660,36 @@ def run() -> None:
         where_choices = ListProperty([])
         is_scan = BooleanProperty(False)
         feed_status = StringProperty("")
+        daily_info = StringProperty("")
+        daily_on = BooleanProperty(False)
+
+        def refresh_daily(self, *_):
+            info = daily_check_info()
+            self.daily_info = info
+            self.daily_on = not info.endswith("is off") and "unavailable" not in info
+
+        def set_daily(self, on):
+            from .config import Settings
+            if on == self.daily_on:
+                return
+            s = Settings.load()
+            try:
+                daily_check_set(on, s.auto_check_time)
+                s.set_value("auto_check_enabled", on)
+                s.save()
+                app.set_status("Daily automatic check " + ("turned on - no need to open the app."
+                                                            if on else "turned off."))
+            except Exception as e:
+                popup("Daily automatic check", str(e))
+            self.daily_on = on
+            Clock.schedule_once(self.refresh_daily, 0.5)
 
         def setup(self, mode):
             self.mode = mode
             self.is_scan = mode == "scan"
             self.refresh_feed_status()
+            if self.is_scan:
+                self.refresh_daily()
             self.findings = []
             self.cancel = threading.Event()
             self.where_map = app.locations(mode)
@@ -719,6 +861,59 @@ def run() -> None:
         summary = StringProperty("")
         folder = StringProperty("")
         retention = NumericProperty(30)
+        location_label = StringProperty("")
+        location_choices = ListProperty([])
+
+        def _sync_location(self, settings):
+            self.location_map = review_location_choices()
+            self.location_choices = list(self.location_map)
+            current = settings.review_folder or None
+            label = next((k for k, v in self.location_map.items()
+                          if (v and current and os.path.samefile(v, current)) or (v is None and current is None)),
+                         None)
+            if label is None and current:
+                label = f"Custom: {current}"
+                self.location_map[label] = current
+                self.location_choices = list(self.location_map)
+            self._syncing = True
+            self.location_label = label or ""
+            self.ids.loc.text = self.location_label
+            self._syncing = False
+
+        def choose_location(self, label):
+            if getattr(self, "_syncing", False) or label == self.location_label or label not in self.location_map:
+                return
+            target = self.location_map[label]
+
+            def go():
+                app.set_status("Moving the Review folder…")
+
+                def job():
+                    try:
+                        n, root_ = self.rf.relocate(target)
+                        msg, err = f"Review folder moved ({n} item(s), all verified).", None
+                    except Exception as e:
+                        msg, err = None, e
+                    self.moved_location(msg, err)
+
+                threading.Thread(target=job, daemon=True).start()
+
+            def cancel():
+                self._syncing = True
+                self.ids.loc.text = self.location_label
+                self._syncing = False
+
+            popup("Move the Review folder?",
+                  f"New place: [b]{label}[/b]\n\n{len(self.items)} item(s) waiting will be copied, checked, "
+                  "and only then removed from the old place.", (("Cancel", cancel), ("Move", go)))
+
+        @mainthread
+        def moved_location(self, msg, err):
+            if err:
+                popup("Could not move the Review folder", f"{err}\n\nNothing was changed.")
+            else:
+                app.set_status(msg)
+            self.refresh()
 
         def refresh(self):
             from .config import Settings
@@ -730,7 +925,8 @@ def run() -> None:
                 self.summary = f"Review folder unavailable: {e}"
                 return
             self.retention = settings.review_retention_days
-            self.folder = str(self.rf.files)
+            self.folder = str(self.rf.root)
+            self._sync_location(settings)
             self.items = self.rf.items()
             self.ids.rv.data = [{
                 "title": os.path.basename(it.original_path), "reason": it.reason,
@@ -851,6 +1047,7 @@ def run() -> None:
                     self.review_screen = ReviewScreen(name="review")
                     for s in (self.scan_screen, self.clean_screen, self.review_screen):
                         sm.add_widget(s)
+                    self.setup_daily_check()
                     self.scan_screen.setup("scan")
                     self.clean_screen.setup("clean")
                     self.review_screen.refresh()
@@ -861,9 +1058,25 @@ def run() -> None:
             else:
                 self.root_box.add_widget(PermissionView())
 
+        def setup_daily_check(self):
+            """Android: the daily check is on by default (it can be turned off on the Scan screen)."""
+            if not is_android_app():
+                return
+            from .config import Settings
+            s = Settings.load()
+            ask_notification_permission()
+            try:
+                if s.auto_check_enabled:
+                    daily_check_set(True, s.auto_check_time)  # also re-arms the alarm
+            except Exception as e:
+                print("daily check setup failed:", e)
+
         def on_resume(self):
             if self.main is None:
                 self.check_access()
+            else:
+                self.scan_screen.refresh_daily()
+                self.review_screen.refresh()
 
         def on_pause(self):
             return True
@@ -938,6 +1151,17 @@ def run() -> None:
                 self.main.ids.review_tab.state = "down"
                 self.review_screen.refresh()
                 print(f"AUTOTEST review items={len(self.review_screen.items)} folder={self.review_screen.folder}")
+                print(f"AUTOTEST daily {daily_check_info()}")
+                try:
+                    from jnius import autoclass  # type: ignore
+                    from .config import Settings
+                    st = Settings.load()
+                    st.set_value("virusshare_lists", 2)  # keep the test download small
+                    st.save()
+                    autoclass("org.safesweep.safesweep.DailyCheck").runSoon(_context(), 40)
+                    print("AUTOTEST background check armed in 40s")
+                except Exception as e:
+                    print(f"AUTOTEST could not arm background check: {e}")
                 print("AUTOTEST done")
 
             self.run_selftest(lambda ok: Clock.schedule_once(lambda dt: after_selftest(ok), 3))

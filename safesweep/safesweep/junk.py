@@ -167,6 +167,7 @@ def find_junk(settings: Settings, paths: Optional[list[str]] = None,
     """`now` and `kind` exist for testing (simulate the future / force a folder type)."""
     stats = stats if stats is not None else {}
     roots = [os.path.abspath(os.path.expanduser(r)) for r in (paths or settings.junk_paths)]
+    settings.review_dir  # make sure the Review folder is never scanned, wherever it is
     now = time.time() if now is None else now
     findings: dict[str, Finding] = {}
     dup_candidates: dict[int, list[FileInfo]] = defaultdict(list)

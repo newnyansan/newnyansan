@@ -133,10 +133,21 @@ def path_is_within(path: str, parent: str) -> bool:
     return path == parent or path.startswith(parent.rstrip(os.sep) + os.sep)
 
 
+_EXTRA_PROTECTED: set = set()
+REVIEW_SUBFOLDER = "SafeSweep Review"
+
+
+def register_protected(path) -> None:
+    """Protect an extra location for this process (e.g. a Review folder you placed elsewhere)."""
+    _EXTRA_PROTECTED.add(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
 def is_protected(path: str | os.PathLike) -> bool:
     path = os.fspath(path)
     if path_is_within(path, str(app_home())):
         return True  # never scan/move SafeSweep's own data (incl. the Review folder)
+    if any(path_is_within(path, p) for p in _EXTRA_PROTECTED):
+        return True  # the Review folder, wherever you chose to put it
     if any(path_is_within(path, d) for d in program_dirs()):
         return True  # SafeSweep's own installed program files
     return any(path_is_within(path, pref) for pref in protected_prefixes())
@@ -158,14 +169,24 @@ class Settings:
     find_duplicates: bool = True
     threat_feeds_enabled: bool = True     # download threat lists from verified sources (abuse.ch)
     threat_feed_update_hours: int = 24    # refresh the lists when older than this
-    threat_feed_full: bool = False        # also get the full MalwareBazaar archive (large download)
+    virusshare_lists: int = 16            # newest VirusShare MD5 lists to keep (65k-131k hashes each; 0 = off)
     threat_feed_keep_days: int = 365      # forget list entries older than this
-    abusech_auth_key: str = ""            # optional free key from abuse.ch, if they require one
+    abusech_auth_key: str = ""            # free key from auth.abuse.ch - enables the daily-updated lists
+    auto_check_enabled: bool = True       # Android app: run the daily automatic check
+    auto_check_time: str = "12:30"        # daily automatic check (24-hour clock, local time)
+    auto_quarantine: bool = True          # automatic check moves confirmed threats to Review (never deletes)
     max_hash_mb: int = 512                # don't hash files bigger than this when scanning for viruses
+
+    review_folder: str = ""               # where your Review folder lives ("" = SafeSweep's data folder)
 
     @property
     def review_dir(self) -> Path:
-        return app_home() / "Review"
+        if self.review_folder:
+            d = Path(os.path.abspath(os.path.expanduser(self.review_folder))) / REVIEW_SUBFOLDER
+        else:
+            d = app_home() / "Review"
+        register_protected(d)
+        return d
 
     @classmethod
     def path(cls) -> Path:
@@ -188,6 +209,7 @@ class Settings:
                         s.set_value(f.name, data[f.name])
                     except (TypeError, ValueError):
                         pass  # ignore a bad value, keep the default
+        s.review_dir  # registers the Review folder as protected
         return s
 
     def set_value(self, key: str, value) -> None:
@@ -214,6 +236,27 @@ class Settings:
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                 raise ValueError(f"{key} must be a list of text values")
         setattr(self, key, value)
+
+    def check_review_location(self, parent: str | None) -> Path:
+        """Validate a new location for the Review folder; returns the folder that would be used."""
+        if not parent:
+            return app_home() / "Review"
+        p = os.path.abspath(os.path.expanduser(parent))
+        if not os.path.isdir(p):
+            raise ValueError(f"Folder not found: {p}")
+        if any(path_is_within(p, pref) for pref in protected_prefixes()) or \
+                any(path_is_within(p, d) for d in program_dirs()):
+            raise ValueError("That is a system or program folder - pick a folder of your own")
+        if path_is_within(p, str(self.review_dir)):
+            raise ValueError("Pick a folder outside the current Review folder")
+        target = Path(p) / REVIEW_SUBFOLDER
+        try:
+            import tempfile as _t
+            with _t.NamedTemporaryFile(dir=p, prefix=".safesweep-write-test-"):
+                pass
+        except OSError as e:
+            raise ValueError(f"SafeSweep can't write to {p}: {e}") from None
+        return target
 
     def save(self) -> None:
         p = self.path()

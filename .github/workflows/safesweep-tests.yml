@@ -46,6 +46,7 @@ jobs:
           python-version: "3.13"
       - name: Download from abuse.ch and verify
         run: |
+          python -m safesweep settings --set virusshare_lists=3
           python -m safesweep update -v
           python - <<'PY'
           import json, pathlib, sys
