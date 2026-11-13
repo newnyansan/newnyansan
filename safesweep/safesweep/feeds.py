@@ -87,13 +87,44 @@ def feeds_dir() -> Path:
 
 
 # ----------------------------------------------------------------------------- download
+ANDROID_CA_DIRS = ("/apex/com.android.conscrypt/cacerts", "/system/etc/security/cacerts")
+_PEM_RE = re.compile(r"-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+?-----END CERTIFICATE-----")
+
+
+def system_ca_pem(dirs: Iterable[str] = ANDROID_CA_DIRS) -> str:
+    """Android's built-in trusted certificates, read file by file (the folder uses an old
+    hash naming that OpenSSL's folder lookup can't use)."""
+    for d in dirs:
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        blocks = []
+        for name in names:
+            try:
+                with open(os.path.join(d, name), encoding="ascii", errors="ignore") as f:
+                    blocks.extend(_PEM_RE.findall(f.read()))
+            except OSError:
+                continue
+        if blocks:
+            return "\n".join(blocks) + "\n"
+    return ""
+
+
 def _ssl_context() -> ssl.SSLContext:
-    """Verified TLS. Uses certifi's CA bundle when present (needed on Android)."""
-    try:
-        import certifi  # type: ignore
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
+    """Verified TLS: the operating system's trusted certificates (on Android, its built-in store)."""
+    ctx = ssl.create_default_context()
+    from .config import is_android
+    if is_android():
+        pem = system_ca_pem()
+        if pem:
+            ctx.load_verify_locations(cadata=pem)
+    if not ctx.get_ca_certs():
+        try:  # optional fallback when the system has no usable store
+            import certifi  # type: ignore
+            ctx.load_verify_locations(cafile=certifi.where())
+        except ImportError:
+            pass
     ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
     return ctx

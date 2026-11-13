@@ -394,6 +394,23 @@ class FeedSecurityTests(Base):
             download(self.url + "/big", str(self.base / "o3"), 100_000,
                      allowed_hosts=frozenset({"127.0.0.1"}), context=ctx)
 
+    def test_android_style_certificate_store_is_trusted(self):
+        """Android stores CA certs as '<oldhash>.0' files with extra text; they must load and verify."""
+        import ssl
+        from safesweep.feeds import download, system_ca_pem
+        store = self.base / "cacerts"
+        store.mkdir()
+        cert = open(self.cert).read()
+        (store / "1a2b3c4d.0").write_text("Certificate:\n    Data: (human readable dump)\n" + cert + "SHA1 Fingerprint=xx\n")
+        (store / "junk.0").write_text("not a certificate")
+        pem = system_ca_pem([str(self.base / "missing"), str(store)])
+        self.assertEqual(pem.count("BEGIN CERTIFICATE"), 1)
+        ctx = ssl.create_default_context(cadata=pem)
+        n = download(self.url + "/list", str(self.base / "out"), 10_000,
+                     allowed_hosts=frozenset({"127.0.0.1"}), context=ctx)
+        self.assertGreater(n, 60)
+        self.assertEqual(system_ca_pem([str(self.base / "missing")]), "")
+
     def test_hash_index_lookup(self):
         import hashlib
         from safesweep.feeds import HashIndex

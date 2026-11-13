@@ -10,7 +10,9 @@ source.exclude_dirs = tests,packaging,bin,build,dist,.buildozer,__pycache__
 version.regex = __version__ = ['"](.*)['"]
 version.filename = %(source.dir)s/safesweep/__init__.py
 
-requirements = python3,kivy,pyjnius,android,certifi
+# Only packages with python-for-android recipes: anything else triggers p4a's pip stage,
+# which breaks multi-architecture builds. HTTPS uses Android's own certificate store.
+requirements = python3,kivy,pyjnius,android
 orientation = portrait
 fullscreen = 0
 icon.filename = %(source.dir)s/assets/icon.png
