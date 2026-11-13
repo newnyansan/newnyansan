@@ -32,3 +32,32 @@ jobs:
           python -m pip install .
           safesweep --version
           safesweep scan tests --report-only
+
+  live-threat-lists:
+    name: Live download of the real threat lists
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: safesweep
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Download from abuse.ch and verify
+        run: |
+          python -m safesweep update -v
+          python - <<'PY'
+          import json, pathlib, sys
+          from safesweep.config import app_home
+          ok = False
+          for f in sorted((app_home() / "feeds").glob("*.json")):
+              m = json.loads(f.read_text())
+              print(f.stem, "ok" if m.get("ok") else "FAILED", m.get("count"), m.get("error", ""))
+              ok |= bool(m.get("ok")) and m.get("count", 0) >= 100
+          sys.exit(0 if ok else 1)
+          PY
+      - name: A scan uses the downloaded lists
+        run: |
+          python -m safesweep scan tests --report-only --offline | tee out.txt
+          grep -E "[0-9,]+ online threat-list fingerprints" out.txt

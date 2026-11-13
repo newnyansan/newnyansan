@@ -57,6 +57,7 @@ check "cleanup found the partial download"     "AUTOTEST clean rec=True video.mp
 check "files were moved to the Review folder"  "AUTOTEST moved=2 errors=\[\]"
 check "Review folder lists them"               "AUTOTEST review items=2"
 check "finished"                               "AUTOTEST done"
+check "threat lists downloaded on the phone (verified HTTPS)" "AUTOTEST feeds Online threat lists: [0-9,]+ known"
 if grep -q "Traceback" "$OUT/logcat.txt"; then echo "FAIL  Python error in log"; fail=1; fi
 adb shell pidof "$PKG" >/dev/null && echo "PASS  app still running" || { echo "FAIL  app is not running"; fail=1; }
 echo "Files left in Download:"; adb shell ls /sdcard/Download

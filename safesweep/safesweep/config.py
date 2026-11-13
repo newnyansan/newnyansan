@@ -156,6 +156,11 @@ class Settings:
     clamav_extra_args: list[str] = field(default_factory=list)
     report_macros: bool = True            # list Office files with macros (informational)
     find_duplicates: bool = True
+    threat_feeds_enabled: bool = True     # download threat lists from verified sources (abuse.ch)
+    threat_feed_update_hours: int = 24    # refresh the lists when older than this
+    threat_feed_full: bool = False        # also get the full MalwareBazaar archive (large download)
+    threat_feed_keep_days: int = 365      # forget list entries older than this
+    abusech_auth_key: str = ""            # optional free key from abuse.ch, if they require one
     max_hash_mb: int = 512                # don't hash files bigger than this when scanning for viruses
 
     @property

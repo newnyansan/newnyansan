@@ -240,6 +240,26 @@ KV = r"""
             text: root.intro
         BoxLayout:
             size_hint_y: None
+            height: dp(40) if root.is_scan else 0
+            opacity: 1 if root.is_scan else 0
+            disabled: not root.is_scan
+            spacing: dp(8)
+            Label:
+                text: root.feed_status
+                color: (0.04, 0.43, 0.39, 1)
+                font_size: '12sp'
+                text_size: self.size
+                halign: 'left'
+                valign: 'middle'
+            Plain:
+                text: 'Update lists'
+                size_hint: None, None
+                size: dp(110), dp(40)
+                font_size: '13sp'
+                disabled: root.running
+                on_release: root.update_lists()
+        BoxLayout:
+            size_hint_y: None
             height: dp(48)
             spacing: dp(8)
             Spinner:
@@ -521,17 +541,21 @@ def run() -> None:
         running = BooleanProperty(False)
         pulse = NumericProperty(0)
         where_choices = ListProperty([])
+        is_scan = BooleanProperty(False)
+        feed_status = StringProperty("")
 
         def setup(self, mode):
             self.mode = mode
+            self.is_scan = mode == "scan"
+            self.refresh_feed_status()
             self.findings = []
             self.cancel = threading.Event()
             self.where_map = app.locations(mode)
             self.where_choices = list(self.where_map)
             self.ids.where.text = self.where_choices[0]
             if mode == "scan":
-                self.intro = ("Looks for known malware, apps and programs disguised as photos or documents, "
-                              "fake file extensions and dangerous scripts.")
+                self.intro = ("Looks for known malware (lists updated daily from abuse.ch), apps and programs "
+                              "disguised as photos or documents, fake file extensions and dangerous scripts.")
                 self.summary = "Tap [b]Start[/b] to scan."
             else:
                 self.intro = ("Finds temporary files, thumbnail caches, empty files, exact duplicate photos/videos "
@@ -545,7 +569,8 @@ def run() -> None:
             settings = Settings.load()
             settings.use_clamav = False
             for k, v in (overrides or {}).items():
-                setattr(settings, k, v)
+                if hasattr(settings, k):
+                    setattr(settings, k, v)
             paths = self.where_map.get(self.ids.where.text) or []
             if not paths:
                 self.summary = "That folder isn't available on this device."
@@ -562,6 +587,12 @@ def run() -> None:
 
             def job():
                 try:
+                    if self.mode == "scan" and settings.threat_feeds_enabled and not (overrides or {}).get("offline"):
+                        from .feeds import maybe_update
+                        try:
+                            maybe_update(settings, app.set_status, cancelled=self.cancel.is_set)
+                        except Exception:
+                            pass  # never block a scan because the internet is down
                     res = worker(settings, paths, lambda p: app.set_status(f"Checking {p}"),
                                  self.cancel.is_set, stats=stats)
                     err = None
@@ -573,6 +604,34 @@ def run() -> None:
 
         def stop(self):
             self.cancel.set()
+
+        @mainthread
+        def refresh_feed_status(self, *_):
+            from .config import Settings
+            from .feeds import status_text
+            self.feed_status = status_text(Settings.load()).replace("Online threat lists: ", "Threat lists: ")
+
+        def update_lists(self):
+            from .config import Settings
+            self.running = True
+            app.set_status("Downloading threat lists from verified sources (abuse.ch)…")
+
+            def job():
+                from .feeds import update_all
+                try:
+                    lines = update_all(Settings.load(), app.set_status)
+                except Exception as e:
+                    lines = [f"Update failed: {e}"]
+                self.lists_updated(lines)
+
+            threading.Thread(target=job, daemon=True).start()
+
+        @mainthread
+        def lists_updated(self, lines):
+            self.running = False
+            self.refresh_feed_status()
+            app.set_status(self.feed_status)
+            popup("Threat lists", "\n\n".join(lines))
 
         @mainthread
         def finished(self, res, stats, err, secs, done_cb):
@@ -601,6 +660,7 @@ def run() -> None:
                 self.summary = (head + f"[b]{len(res)}[/b] found ({human(sum(f.size for f in res))}). "
                                 f"[b]{len(rec)}[/b] recommended are ticked.")
             app.set_status("Done.")
+            self.refresh_feed_status()
             if done_cb:
                 done_cb(res, stats)
 
@@ -855,6 +915,9 @@ def run() -> None:
                 for f in res:
                     print(f"AUTOTEST scan {f.severity} rec={f.recommended} {os.path.basename(f.path)} | {f.reason}")
                 print(f"AUTOTEST scan files={stats.get('files')} found={len(res)}")
+                from .config import Settings
+                from .feeds import status_text
+                print(f"AUTOTEST feeds {status_text(Settings.load())}")
                 Clock.schedule_once(lambda dt: start_clean(), 4)
 
             def start_clean():

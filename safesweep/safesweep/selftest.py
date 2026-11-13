@@ -59,12 +59,15 @@ def run_selftest(out: Callable[[str], None] = print, keep: bool = False) -> tupl
         settings = Settings(scan_paths=[], junk_paths=[], use_clamav=False, large_file_mb=1)
         _threat_tests(c, sandbox / "scan", settings)
         _junk_tests(c, sandbox / "junk", settings)
+        _feed_tests(c, sandbox / "feeds", settings)
         _review_tests(c, sandbox / "review", settings)
         _clamav_info(c, sandbox / "clam", out, user_settings)
     except Exception as e:  # a crash is a failure, not a traceback for the user
         import traceback
         c.check(f"self-test ran without crashing: {e!r}", False, traceback.format_exc(limit=3))
     finally:
+        from .feeds import ThreatLists
+        ThreatLists.reset()  # release list files so the sandbox can be removed (Windows)
         if old_home is None:
             os.environ.pop("SAFESWEEP_HOME", None)
         else:
@@ -247,6 +250,93 @@ def _junk_tests(c: _Checker, root: Path, settings) -> None:
     c.check("temp folder: only old, non-hidden files", res == {"leftover.dat"}, str(res))
     real_now = {Path(f.path).name for f in find_junk(settings, [str(root / user)], kind="user")}
     c.check("brand-new files are never flagged (24h safety window)", not real_now, str(real_now))
+
+
+# --------------------------------------------------------------------------- online threat lists
+def _feed_tests(c: _Checker, root: Path, settings) -> None:
+    import hashlib
+    from . import feeds
+    from .scanner import scan
+    c.out("Online threat lists (offline simulation of the real abuse.ch formats):")
+    root.mkdir(parents=True)
+    dropper = b"pretend malware sample from MalwareBazaar 7"
+    stealer = b"pretend malware sample from ThreatFox 3"
+    unsure = b"low-confidence ThreatFox entry 1"
+    (root / "dropper.exe").write_bytes(dropper)
+    (root / "stealer.bin").write_bytes(stealer)
+    (root / "unsure.bin").write_bytes(unsure)
+    (root / "empty.txt").write_bytes(b"")
+    (root / "normal.pdf").write_bytes(b"%PDF normal")
+    h = lambda b: hashlib.sha256(b).hexdigest()
+    empty = h(b"")
+    bazaar = (
+        '################################################################\n'
+        '# MalwareBazaar recent malware samples (last 48 hours)         #\n'
+        '################################################################\n'
+        '# "first_seen_utc","sha256_hash","md5_hash","sha1_hash","reporter","file_name","file_type_guess",'
+        '"mime_type","signature","clamav","vtpercent","imphash","ssdeep","tlsh"\n'
+        f'"2026-11-13 08:00:01", "{h(dropper)}", "x", "y", "abuse_ch", "inv.exe", "exe", "application/x-dosexec", '
+        '"AgentTesla", "n/a", "n/a", "x", "x", "x"\n'
+        f'"2026-11-13 08:00:02", "{empty}", "x", "y", "abuse_ch", "e", "unknown", "x", "n/a", "n/a", "n/a", "", "", ""\n'
+        '"garbage line without a hash"\n'
+        '# Number of entries: 3\n')
+    threatfox = (
+        '# ThreatFox IOCs: CSV export\n'
+        '# "first_seen_utc","ioc_id","ioc_value","ioc_type","threat_type","fk_malware","malware_alias",'
+        '"malware_printable","last_seen_utc","confidence_level","reference","tags","anonymous","reporter"\n'
+        f'"2026-11-13 07:00:00","1","{h(stealer)}","sha256_hash","payload","win.lumma","","Lumma Stealer","","100","","","0","x"\n'
+        f'"2026-11-13 07:00:00","2","{h(unsure)}","sha256_hash","payload","win.x","","Maybe","","25","","","0","x"\n'
+        '"2026-11-13 07:00:00","3","http://bad.example/x","url","payload_delivery","win.x","","X","","100","","","0","x"\n')
+    served = {}
+
+    def fake_fetch(url, dest, max_bytes, headers):
+        data = served.get(url, b"")
+        Path(dest).write_bytes(data)
+        return len(data)
+
+    by_id = {s.id: s for s in feeds.SOURCES}
+    served[by_id["malwarebazaar"].url] = bazaar.encode()
+    served[by_id["threatfox"].url] = threatfox.encode()
+    lines = feeds.update_all(settings, fetch=fake_fetch)
+    c.check("both lists download and parse", all("failed" not in l for l in lines), "; ".join(lines))
+    res = {Path(f.path).name: f for f in scan(settings, [str(root)])}
+    f = res.get("dropper.exe")
+    c.check("detects a file listed by MalwareBazaar, with its malware name",
+            bool(f and "AgentTesla" in f.reason and f.recommended), f.reason if f else "nothing")
+    f = res.get("stealer.bin")
+    c.check("detects a file listed by ThreatFox, with its malware name",
+            bool(f and "Lumma Stealer" in f.reason), f.reason if f else "nothing")
+    c.check("ignores low-confidence ThreatFox entries", "unsure.bin" not in res)
+    c.check("harmless fingerprints in a list (empty file) never cause alarms", "empty.txt" not in res)
+    c.check("normal files untouched", "normal.pdf" not in res)
+    c.check("no update needed right after updating", not feeds.needs_update(settings))
+    c.check("update is due after 24 hours", feeds.needs_update(settings, now=time.time() + 25 * 3600))
+
+    before = feeds.read_meta(by_id["malwarebazaar"])["count"]
+    served[by_id["malwarebazaar"].url] = b"<!DOCTYPE html><html>Service unavailable</html>"
+    served[by_id["threatfox"].url] = b"# empty export\n"
+    lines = feeds.update_all(settings, fetch=fake_fetch)
+    meta = feeds.read_meta(by_id["malwarebazaar"])
+    c.check("a broken download (web page) is rejected", not meta["ok"] and "web page" in meta["error"])
+    c.check("an empty list is rejected", "no valid entries" in feeds.read_meta(by_id["threatfox"])["error"])
+    still = {Path(f.path).name for f in scan(settings, [str(root)])}
+    c.check("previous lists are kept after a failed update",
+            meta["count"] == before and {"dropper.exe", "stealer.bin"} <= still)
+
+    for url, why in (("http://bazaar.abuse.ch/export/csv/recent/", "plain http"),
+                     ("https://evil.example.com/list.csv", "unknown host")):
+        try:
+            feeds.download(url, str(root / "x"), 1000)
+            ok = False
+        except feeds.FeedError:
+            ok = True
+        c.check(f"refuses unverified source ({why})", ok)
+
+    served[by_id["malwarebazaar"].url] = bazaar.replace(h(dropper), "a" * 64).encode()
+    feeds.update_source(by_id["malwarebazaar"], settings, fake_fetch, now=time.time() + 400 * DAY)
+    feeds.ThreatLists.reset()
+    after = {Path(f.path).name for f in scan(settings, [str(root)])}
+    c.check("entries older than a year expire", "dropper.exe" not in after and "stealer.bin" in after)
 
 
 # --------------------------------------------------------------------------- review folder

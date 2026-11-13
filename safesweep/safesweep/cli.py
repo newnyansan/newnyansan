@@ -36,7 +36,8 @@ def _print_findings(findings: list[Finding], stats: dict) -> None:
     rec = [f for f in findings if f.recommended]
     print(f"\nChecked {stats.get('files', 0)} file(s)"
           + (f", skipped {stats['skipped']} unreadable/protected item(s)" if stats.get("skipped") else "")
-          + (f", ClamAV: {stats['clamav']}" if "clamav" in stats else "") + ".")
+          + (f", ClamAV: {stats['clamav']}" if "clamav" in stats else "")
+          + (f", {stats['threat_lists']:,} online threat-list fingerprints" if stats.get("threat_lists") else "") + ".")
     if stats.get("cancelled"):
         print("Scan was stopped early - results are incomplete.")
     if not findings:
@@ -104,7 +105,28 @@ def _progress(verbose: bool):
     return (lambda p: print(f"  {p}", file=sys.stderr)) if verbose else None
 
 
+def _update_lists(settings: Settings, force: bool, verbose: bool) -> None:
+    from .feeds import maybe_update, status_text, update_all
+    prog = (lambda m: print(f"  {m}", file=sys.stderr)) if verbose or force else None
+    lines = update_all(settings, prog) if force else maybe_update(settings, prog)
+    for line in lines:
+        print(f"  {line}")
+    print(status_text(settings))
+
+
+def cmd_update(args, settings: Settings) -> int:
+    if not settings.threat_feeds_enabled:
+        print("Online threat lists are turned off (settings: threat_feeds_enabled=false).")
+        return 2
+    print("Downloading threat lists from verified sources (abuse.ch MalwareBazaar & ThreatFox)…")
+    _update_lists(settings, True, args.verbose)
+    from .feeds import SOURCES, read_meta
+    return 0 if any(read_meta(s).get("ok") for s in SOURCES) else 1
+
+
 def cmd_scan(args, settings: Settings) -> int:
+    if not args.offline and settings.threat_feeds_enabled:
+        _update_lists(settings, False, args.verbose)
     stats: dict = {}
     findings = scan(settings, args.paths or None, _progress(args.verbose), stats=stats)
     _print_findings(findings, stats)
@@ -172,6 +194,8 @@ def cmd_settings(args, settings: Settings) -> int:
                 return 2
         settings.save()
     for k, v in asdict(settings).items():
+        if k == "abusech_auth_key" and v:
+            v = "(set)"  # never print secrets
         print(f"{k} = {v}")
     print(f"\nsettings file: {Settings.path()}")
     return 0
@@ -191,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--all", action="store_true", help="with --yes: move every item found, not just recommended")
         sp.add_argument("--report-only", action="store_true", help="only list, don't move anything")
         sp.add_argument("-v", "--verbose", action="store_true")
+        if name == "scan":
+            sp.add_argument("--offline", action="store_true", help="don't refresh the online threat lists first")
 
     rv = sub.add_parser("review", help="manage the Review folder")
     rv.add_argument("action", choices=["list", "restore", "delete", "purge"])
@@ -205,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
     sg.add_argument("action", choices=["add"])
     sg.add_argument("file")
 
+    up = sub.add_parser("update", help="download the latest threat lists from verified sources now")
+    up.add_argument("-v", "--verbose", action="store_true")
     sub.add_parser("selftest", help="check that detection and the Review folder work correctly on this device")
     sub.add_parser("gui", help="open the desktop window")
 
@@ -230,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: {e}")
             return 2
         return 0
-    return {"scan": cmd_scan, "clean": cmd_clean, "review": cmd_review,
+    return {"scan": cmd_scan, "clean": cmd_clean, "review": cmd_review, "update": cmd_update,
             "settings": cmd_settings}[args.command](args, settings)
 
 

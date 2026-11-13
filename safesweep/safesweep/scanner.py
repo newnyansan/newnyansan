@@ -231,6 +231,8 @@ def scan(settings: Settings, paths: Optional[list[str]] = None,
     stats = stats if stats is not None else {}
     roots = paths or settings.scan_paths
     sigs = load_signatures()
+    from .feeds import ThreatLists
+    lists = ThreatLists.get() if settings.threat_feeds_enabled else None
     max_hash = settings.max_hash_mb * 1024 * 1024
     findings: dict[str, Finding] = {}
     scanned: list[str] = []
@@ -250,15 +252,18 @@ def scan(settings: Settings, paths: Optional[list[str]] = None,
                                           "high", st.st_size, True, st.st_mtime_ns)
             continue
 
-        if sigs and 0 < st.st_size <= max_hash:
+        if (sigs or lists) and 0 < st.st_size <= max_hash:
             try:
                 digest = sha256_of(info.path, cancelled=cancelled)
             except InterruptedError:
                 break
             except OSError:
                 digest = ""
-            if digest in sigs:
-                findings[info.path] = Finding(info.path, "threat", f"Known malware: {sigs[digest]}", "high",
+            known = sigs.get(digest) if digest else None
+            if digest and not known and lists:
+                known = lists.lookup(digest)
+            if known:
+                findings[info.path] = Finding(info.path, "threat", f"Known malware - {known}", "high",
                                               st.st_size, True, st.st_mtime_ns, {"sha256": digest})
                 continue
 
@@ -278,5 +283,7 @@ def scan(settings: Settings, paths: Optional[list[str]] = None,
             findings[f.path] = f
     else:
         stats["clamav"] = "turned off"
+    if lists is not None:
+        stats["threat_lists"] = sum(idx.count for _, idx in lists.indexes)
 
     return sorted(findings.values(), key=lambda f: (SEVERITY_ORDER[f.severity], f.path))

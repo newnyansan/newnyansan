@@ -99,10 +99,18 @@ def run() -> int:
         threading.Thread(target=job, daemon=True).start()
 
     # ---------- results tab (shared by Virus Scan and Cleanup) ----------
-    def results_tab(title: str, worker, paths_attr: str, intro: str):
+    feed_status = tk.StringVar(value="")
+
+    def refresh_feed_status():
+        from .feeds import status_text
+        feed_status.set(status_text(settings))
+
+    def results_tab(title: str, worker, paths_attr: str, intro: str, before=None, extra=None):
         frame = ttk.Frame(nb, padding=8)
         nb.add(frame, text=title)
         ttk.Label(frame, text=intro, wraplength=980, foreground="#555").pack(anchor="w", pady=(0, 6))
+        if extra:
+            extra(frame)
 
         top = ttk.Frame(frame)
         top.pack(fill="x")
@@ -233,6 +241,9 @@ def run() -> int:
                          f"{len(rec)} ✓ recommended ({_human(sum(f.size for f in rec))})"]
                 if "clamav" in stats:
                     lines.append(f"ClamAV: {stats['clamav']}")
+                if stats.get("threat_lists"):
+                    lines.append(f"{stats['threat_lists']:,} online threat-list fingerprints")
+                refresh_feed_status()
                 if stats.get("cancelled"):
                     lines.append("STOPPED - incomplete")
                 summary.set("\n".join(lines))
@@ -240,17 +251,57 @@ def run() -> int:
                 status.set(f"{name} finished." + (" Nothing found." if not res else
                            " ✓ items are pre-selected; others need a closer look."))
 
-            in_background(lambda: worker(settings, paths, lambda p: events.put(("status", f"Checking {p}")),
-                                         cancel.is_set, stats=stats), done)
+            def job():
+                if before:
+                    before(lambda m: events.put(("status", m)), cancel.is_set)
+                return worker(settings, paths, lambda p: events.put(("status", f"Checking {p}")),
+                              cancel.is_set, stats=stats)
+
+            in_background(job, done)
 
         start_btn.configure(command=start)
 
+    def update_lists_before_scan(progress, cancelled):
+        from .feeds import maybe_update
+        maybe_update(settings, progress, cancelled=cancelled)
+
+    def feed_bar(frame):
+        bar = ttk.Frame(frame)
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(bar, textvariable=feed_status, foreground="#0b6e63").pack(side="left")
+        btn = ttk.Button(bar, text="Update threat lists now")
+        btn.pack(side="right")
+
+        def update_now():
+            btn.state(["disabled"])
+            status.set("Downloading threat lists from verified sources (abuse.ch)…")
+
+            def work():
+                from .feeds import update_all
+                return update_all(settings, lambda m: events.put(("status", m)))
+
+            def done(lines, exc):
+                btn.state(["!disabled"])
+                refresh_feed_status()
+                if exc:
+                    messagebox.showerror("Threat lists", str(exc))
+                    return
+                status.set(feed_status.get())
+                messagebox.showinfo("Threat lists", "\n".join(lines) or "Nothing to update.")
+
+            in_background(work, done)
+
+        btn.configure(command=update_now)
+        refresh_feed_status()
+
     clam = clamav_available()
     results_tab("🛡 Virus Scan", scan, "scan_paths",
-                "Checks for known malware (" + ("ClamAV + " if clam else "") + "built-in signatures), programs "
+                "Checks for known malware (" + ("ClamAV + " if clam else "") + "daily-updated threat lists from abuse.ch), programs "
                 "disguised as documents, fake/hidden extensions and dangerous scripts. Flagged items are moved to "
                 "the Review folder and made non-executable." + ("" if clam else
-                "  Tip: install the free ClamAV for full virus definitions."))
+                "  Tip: install the free ClamAV for full virus definitions."),
+                before=lambda p, c: settings.threat_feeds_enabled and update_lists_before_scan(p, c),
+                extra=feed_bar)
     results_tab("🧹 Cleanup", find_junk, "junk_paths",
                 "Finds temporary files, old caches and logs, exact duplicates, empty files, old installers and "
                 "downloads you haven't opened in a long time. Programs, projects and app data are never touched. "

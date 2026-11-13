@@ -15,6 +15,30 @@ A cautious **virus scanner + junk cleaner** for PC (Windows, macOS, Linux) and A
 | 📂 **Review Folder** | Flagged files are moved here, not deleted. Threats get a `.quarantined` suffix and lose execute permission. Restore puts files back exactly where they were (never overwriting anything) with their original permissions. Optional auto-delete after 30 days. |
 | 🧪 **Self-test** | `safesweep selftest` (or *Help → Run self-test*) builds a sandbox with 50+ tricky cases - real threat patterns, harmless look-alikes, junk vs. important files, crash scenarios - and proves everything behaves correctly **on your device**. |
 
+## Online threat lists (verified sources only)
+
+SafeSweep downloads lists of **confirmed malware fingerprints** (SHA-256) and checks every scanned file
+against them - viruses, trojans, ransomware, info-stealers, banking malware, etc.
+
+| Source | What it is |
+|---|---|
+| [MalwareBazaar](https://bazaar.abuse.ch) by abuse.ch | Malware samples submitted and confirmed by security researchers, with the malware family name (e.g. *AgentTesla*, *Lumma Stealer*). |
+| [ThreatFox](https://threatfox.abuse.ch) by abuse.ch | File fingerprints from incident responders; only entries with confidence ≥ 50% are used. |
+| [ClamAV](https://www.clamav.net) official definitions | Updated with `freshclam` when ClamAV is installed. |
+
+- Updated automatically before a scan when older than 24 h (`threat_feed_update_hours`), or any
+  time with **Update threat lists** / `safesweep update`. A scan never waits on a broken connection:
+  it just uses the lists you already have (`safesweep scan --offline` skips the update).
+- **Only those sources, only over verified HTTPS.** The addresses are built in; certificates are
+  checked; redirects to any other host, oversized downloads, web/error pages and lists without valid
+  entries are rejected - and a failed update never replaces the lists you already have.
+- Lists **build up over time** (each update adds the newest samples; entries expire after a year).
+  `threat_feed_full=true` also downloads the complete MalwareBazaar archive (large).
+- Fingerprints of harmless content (like an empty file) are ignored even if a list contains them,
+  so they can't cause false alarms. A match is an exact, byte-for-byte copy of a confirmed sample.
+- If abuse.ch ever requires their free Auth-Key, get one at <https://auth.abuse.ch> and run
+  `safesweep settings --set abusech_auth_key=YOUR_KEY`.
+
 ## Safety rules (why it doesn't misfire)
 
 - **Never deletes on its own.** Only you delete, from the Review folder, after a confirmation.
@@ -96,6 +120,7 @@ safesweep clean                     # find unneeded files
 safesweep clean ~/Downloads -y      # move the recommended (✓) items to Review without asking
 safesweep clean ~/Downloads -y --all  # ...or everything found
 safesweep selftest                  # prove it works correctly on this device
+safesweep update                    # download the latest threat lists now
 
 safesweep review list               # see what's waiting
 safesweep review restore <id>       # put it back
@@ -153,7 +178,7 @@ doesn't inspect running processes or memory.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v   # 31 unit tests (includes the 56-check self-test)
+python -m unittest discover -s tests -v   # 34 unit tests (includes the 70-check self-test)
 python -m safesweep selftest
 ```
 

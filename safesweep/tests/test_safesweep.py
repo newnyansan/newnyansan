@@ -316,6 +316,99 @@ class AppTests(Base):
             self.assertTrue((PKG_DIR / p).exists(), p)
 
 
+class FeedSecurityTests(Base):
+    """Real HTTPS against a local server: verification must not be bypassable."""
+
+    def setUp(self):
+        super().setUp()
+        import shutil
+        if not shutil.which("openssl"):
+            self.skipTest("openssl not available")
+        self.cert, self.key = str(self.base / "cert.pem"), str(self.base / "key.pem")
+        r = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                            "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
+                            "-keyout", self.key, "-out", self.cert], capture_output=True)
+        if r.returncode:
+            self.skipTest("openssl could not create a test certificate")
+        import http.server
+        import ssl
+        body = b'# "sha256_hash","signature"\n"' + b"b" * 64 + b'","Test"\n'
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", "https://evil.example.com/x")
+                    self.end_headers()
+                    return
+                if self.path == "/big":
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"x" * 300_000)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        self.httpd = http.server.HTTPServer(("127.0.0.1", 0), H)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(self.cert, self.key)
+        self.httpd.socket = ctx.wrap_socket(self.httpd.socket, server_side=True)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.url = f"https://127.0.0.1:{self.httpd.server_address[1]}"
+        self._no_proxy = os.environ.get("NO_PROXY"), os.environ.get("no_proxy")
+        os.environ["NO_PROXY"] = os.environ["no_proxy"] = "127.0.0.1,localhost"
+
+    def tearDown(self):
+        if hasattr(self, "httpd"):
+            self.httpd.shutdown()
+            for k, v in zip(("NO_PROXY", "no_proxy"), self._no_proxy):
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        super().tearDown()
+
+    def test_untrusted_certificate_is_refused(self):
+        from safesweep.feeds import FeedError, download
+        with self.assertRaises(FeedError) as cm:
+            download(self.url + "/list", str(self.base / "out"), 10_000, allowed_hosts=frozenset({"127.0.0.1"}))
+        self.assertIn("verified", str(cm.exception))
+        self.assertFalse((self.base / "out").exists() and (self.base / "out").stat().st_size)
+
+    def test_trusted_certificate_works_and_limits_apply(self):
+        import ssl
+        from safesweep.feeds import FeedError, download
+        ctx = ssl.create_default_context(cafile=self.cert)
+        n = download(self.url + "/list", str(self.base / "out"), 10_000,
+                     allowed_hosts=frozenset({"127.0.0.1"}), context=ctx)
+        self.assertGreater(n, 60)
+        with self.assertRaises(FeedError):  # redirect to a host that is not on the list
+            download(self.url + "/redirect", str(self.base / "o2"), 10_000,
+                     allowed_hosts=frozenset({"127.0.0.1"}), context=ctx)
+        with self.assertRaises(FeedError):  # bigger than the size limit
+            download(self.url + "/big", str(self.base / "o3"), 100_000,
+                     allowed_hosts=frozenset({"127.0.0.1"}), context=ctx)
+
+    def test_hash_index_lookup(self):
+        import hashlib
+        from safesweep.feeds import HashIndex
+        hs = [hashlib.sha256(str(i).encode()).hexdigest() for i in range(5000)]
+        p = self.base / "x.bin"
+        self.assertEqual(HashIndex.write(p, hs), 5000)
+        idx = HashIndex(p)
+        try:
+            self.assertTrue(all(bytes.fromhex(h) in idx for h in hs[::97]))
+            self.assertFalse(bytes.fromhex("0" * 64) in idx)
+            self.assertFalse(bytes.fromhex("f" * 64) in idx)
+        finally:
+            idx.close()
+
+
 class CliTests(Base):
     def run_cli(self, *args, stdin=""):
         env = dict(os.environ, PYTHONPATH=str(PKG_DIR))
@@ -332,7 +425,7 @@ class CliTests(Base):
     def test_scan_report_only_and_exit_code(self):
         from safesweep.scanner import EICAR
         self.write("e.com", EICAR)
-        r = self.run_cli("settings", "--set", "use_clamav=false")
+        r = self.run_cli("settings", "--set", "use_clamav=false", "threat_feeds_enabled=false")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         r = self.run_cli("scan", str(self.data), "--report-only")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -343,7 +436,7 @@ class CliTests(Base):
         from safesweep.scanner import EICAR
         self.write("e.com", EICAR)
         self.run_cli("settings", "--set", "use_clamav=false")
-        r = self.run_cli("scan", str(self.data), stdin="bogus\nr\n")
+        r = self.run_cli("scan", str(self.data), "--offline", stdin="bogus\nr\n")
         self.assertIn("Please type", r.stdout)
         self.assertFalse((self.data / "e.com").exists())
         listing = self.run_cli("review", "list").stdout
