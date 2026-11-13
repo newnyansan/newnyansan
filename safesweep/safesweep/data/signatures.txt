@@ -1,0 +1,5 @@
+# SafeSweep local signature list: one SHA-256 per line, optional "  name" after it.
+# This list is intentionally tiny. For real-world malware coverage install ClamAV
+# (SafeSweep uses it automatically) and/or append hashes from a trusted feed with:
+#     safesweep signatures add <file-with-hashes>
+275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f  EICAR-Test-File

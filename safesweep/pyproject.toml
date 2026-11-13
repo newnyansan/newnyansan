@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "safesweep"
+version = "0.1.0"
+description = "Virus scanner and junk cleaner that moves items to a Review folder before deleting"
+requires-python = ">=3.9"
+readme = "README.md"
+
+[project.scripts]
+safesweep = "safesweep.cli:main"
+
+[project.gui-scripts]
+safesweep-gui = "safesweep.gui:run"
+
+[tool.setuptools.packages.find]
+include = ["safesweep*"]
+
+[tool.setuptools.package-data]
+safesweep = ["data/*.txt"]
