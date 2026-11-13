@@ -140,10 +140,11 @@ jobs:
           grep -n "p4a\." buildozer.spec
       - name: Build the APK
         run: |
-          set -o pipefail
+          # (no pipefail: `yes` is always killed by SIGPIPE when buildozer finishes)
           yes | buildozer -v android debug > build.log 2>&1 || { tail -n 250 build.log; exit 1; }
           tail -n 20 build.log
           ls -la bin
+          ls bin/*.apk > /dev/null || { echo "no APK was produced"; tail -n 250 build.log; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: SafeSweep-Android-APK
