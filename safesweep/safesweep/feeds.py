@@ -622,3 +622,61 @@ class ThreatLists:
         except (OSError, IndexError):
             pass
         return ""
+
+
+# ----------------------------------------------------------------------------- abuse.ch Auth-Key
+KEY_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+KEY_SIGNUP_URL = "https://auth.abuse.ch/"
+
+
+def normalize_key(raw: str) -> str:
+    """Clean up a pasted key (spaces, line breaks, quotes) and check that it looks right."""
+    key = re.sub(r"[\s\"'`]", "", raw or "")
+    if key.lower().startswith("auth-key:"):
+        key = key[len("auth-key:"):]
+    if not KEY_RE.match(key):
+        raise ValueError("That doesn't look like an abuse.ch Auth-Key. Copy the key from your "
+                         "profile page at auth.abuse.ch (letters and numbers, no spaces).")
+    return key
+
+
+def masked_key(key: str) -> str:
+    return f"{key[:4]}…{key[-4:]}" if len(key) > 10 else "•" * len(key)
+
+
+def save_auth_key(settings: Settings, raw: str) -> str:
+    key = normalize_key(raw)
+    settings.abusech_auth_key = key
+    settings.save()
+    return key
+
+
+def remove_auth_key(settings: Settings) -> None:
+    settings.abusech_auth_key = ""
+    settings.save()
+
+
+def test_auth_key(settings: Settings, fetch: Optional[Fetcher] = None,
+                  progress: Optional[Callable[[str], None]] = None) -> tuple[bool, str]:
+    """Download the abuse.ch lists with the saved key. Returns (worked, plain-language message)."""
+    if not settings.abusech_auth_key:
+        return False, "No key saved."
+    fetch = fetch or _default_fetcher(settings)
+    results = []
+    for src in (s for s in SOURCES if s.needs_key):
+        if progress:
+            progress(f"Checking your key with {src.label} …")
+        results.append((src, update_source(src, settings, fetch)))
+    ThreatLists.reset()
+    good = [(s, m) for s, m in results if m.get("ok")]
+    if good:
+        lines = [f"{s.label}: {m['count']:,} known malware fingerprints" for s, m in good]
+        return True, "Your key works. Daily-updated lists are now on.\n\n" + "\n".join(lines)
+    errors = " ".join(str(m.get("error", "")) for _, m in results)
+    # Only a refusal from abuse.ch's own server means a bad key; a proxy/firewall "403" while
+    # connecting ("could not connect: ... 403") is a network problem.
+    if re.search(r"server answered (401|403)\b", errors):
+        return False, ("abuse.ch did not accept this key. Check that you copied the whole key "
+                       "from your profile page at auth.abuse.ch.")
+    return False, ("Couldn't reach abuse.ch right now (no internet?). The key is saved and will be "
+                   "used automatically next time.\n\nDetails: " + errors.strip())

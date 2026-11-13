@@ -299,7 +299,84 @@ def run() -> int:
             in_background(work, done)
 
         btn.configure(command=update_now)
+        ttk.Button(bar, text="abuse.ch key…", command=key_dialog).pack(side="right", padx=(0, 6))
         refresh_feed_status()
+
+    def key_dialog():
+        from . import feeds
+        win = tk.Toplevel(root)
+        win.title("abuse.ch Auth-Key")
+        win.transient(root)
+        win.resizable(False, False)
+        body = ttk.Frame(win, padding=14)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, wraplength=460, justify="left", text=(
+            "With a free abuse.ch Auth-Key, SafeSweep also downloads the malware lists that "
+            "abuse.ch updates every day (MalwareBazaar and ThreatFox), so it recognises "
+            "threats discovered in the last few days.\n\n"
+            "1. Click 'Get a free key' and sign in.\n2. Copy the Auth-Key from your profile page.\n"
+            "3. Paste it below (Ctrl+V) and click 'Save and test'.")).pack(anchor="w")
+        current = tk.StringVar()
+
+        def show_current():
+            k = settings.abusech_auth_key
+            current.set(f"Saved key: {feeds.masked_key(k)}" if k else "No key saved yet.")
+
+        show_current()
+        ttk.Label(body, textvariable=current, foreground="#0b6e63").pack(anchor="w", pady=(10, 4))
+        row = ttk.Frame(body)
+        row.pack(fill="x")
+        key_var = tk.StringVar()
+        entry = ttk.Entry(row, textvariable=key_var, show="•", width=54)
+        entry.pack(side="left", fill="x", expand=True)
+        shown = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row, text="Show", variable=shown,
+                        command=lambda: entry.configure(show="" if shown.get() else "•")).pack(side="left", padx=6)
+        result = tk.StringVar()
+        ttk.Label(body, textvariable=result, wraplength=460, justify="left").pack(anchor="w", pady=(8, 0))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(12, 0))
+
+        def open_signup():
+            import webbrowser
+            webbrowser.open(feeds.KEY_SIGNUP_URL)
+
+        def save_and_test():
+            try:
+                feeds.save_auth_key(settings, key_var.get())
+            except ValueError as e:
+                result.set(str(e))
+                return
+            key_var.set("")
+            show_current()
+            save_btn.state(["disabled"])
+            result.set("Saved. Checking the key with abuse.ch…")
+
+            def done(res, exc):
+                if not win.winfo_exists():
+                    return
+                save_btn.state(["!disabled"])
+                refresh_feed_status()
+                result.set(f"Error: {exc}" if exc else res[1])
+
+            in_background(lambda: feeds.test_auth_key(settings, progress=lambda m: events.put(("status", m))), done)
+
+        def remove():
+            if settings.abusech_auth_key and messagebox.askyesno(
+                    "Remove key?", "Remove the saved abuse.ch key? The daily-updated lists will stop updating.",
+                    parent=win):
+                feeds.remove_auth_key(settings)
+                show_current()
+                refresh_feed_status()
+                result.set("Key removed.")
+
+        ttk.Button(buttons, text="Get a free key", command=open_signup).pack(side="left")
+        ttk.Button(buttons, text="Close", command=win.destroy).pack(side="right")
+        ttk.Button(buttons, text="Remove key", command=remove).pack(side="right", padx=6)
+        save_btn = ttk.Button(buttons, text="Save and test", style="Accent.TButton", command=save_and_test)
+        save_btn.pack(side="right")
+        entry.focus_set()
+        win.bind("<Return>", lambda e: save_and_test())
 
     clam = clamav_available()
     results_tab("🛡 Virus Scan", scan, "scan_paths",
@@ -371,23 +448,32 @@ def run() -> int:
         if not messagebox.askyesno("Delete permanently?",
                                    f"Permanently delete {len(ids)} item(s) ({_human(size)})?\nThis cannot be undone."):
             return
-        freed, errors = 0, []
-        for i in ids:
-            try:
-                freed += review.delete(i)
-            except (ReviewError, OSError, KeyError) as e:
-                errors.append(str(e))
-        refresh_review()
-        status.set(f"Deleted {len(ids) - len(errors)} item(s), freed {_human(freed)}.")
-        if errors:
-            messagebox.showwarning("Some items could not be deleted", "\n".join(errors[:15]))
+        status.set(f"Deleting {len(ids)} item(s)…")
+
+        def done(res, exc):
+            refresh_review()
+            if exc:
+                messagebox.showerror("Nothing was deleted", str(exc))
+                status.set("Nothing was deleted.")
+                return
+            deleted, freed, errors = res
+            status.set(f"Deleted {deleted} item(s), freed {_human(freed)}.")
+            if errors:
+                messagebox.showwarning(f"{len(errors)} item(s) could not be deleted", "\n".join(errors[:15]))
+
+        in_background(lambda: review.delete_many(list(ids)), done)
 
     def purge_expired():
         days = settings.review_retention_days
         if messagebox.askyesno("Delete old items?", f"Permanently delete items that have been in review for {days}+ days?"):
-            n, freed = review.purge(days)
-            refresh_review()
-            status.set(f"Deleted {n} expired item(s), freed {_human(freed)}.")
+            def done(res, exc):
+                refresh_review()
+                if exc:
+                    messagebox.showerror("Could not delete old items", str(exc))
+                    return
+                status.set(f"Deleted {res[0]} expired item(s), freed {_human(res[1])}.")
+
+            in_background(lambda: review.purge(days), done)
 
     folder_var = tk.StringVar(value=f"Folder: {review.files.parent}")
     floc = ttk.Frame(rframe)

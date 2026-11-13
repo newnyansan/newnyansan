@@ -223,6 +223,58 @@ class ReviewTests(Base):
         rf.move_in(self.finding(self.write("a.tmp")))
         self.assertEqual(len(rf.items()), 1)
 
+    def test_delete_all_after_a_process_was_killed_holding_the_lock(self):
+        """The reported phone bug: 'All' -> 'Delete' froze and nothing was deleted."""
+        from safesweep.review import ReviewFolder
+        rf = ReviewFolder(self.settings)
+        for i in range(5):
+            rf.move_in(self.finding(self.write(f"x{i}.tmp", str(i).encode())))
+        rf._lockfile.write_text("12345")  # leftover lock file from the old version
+        code = ("import os,sys,time; sys.path.insert(0, sys.argv[1]); "
+                "from safesweep.config import Settings; from safesweep.review import ReviewFolder; "
+                "rf = ReviewFolder(Settings(scan_paths=[], use_clamav=False)); "
+                "cm = rf._locked(); cm.__enter__(); print('locked', flush=True); time.sleep(60)")
+        proc = subprocess.Popen([sys.executable, "-c", code, str(PKG_DIR)], stdout=subprocess.PIPE, text=True,
+                                env=dict(os.environ))
+        self.assertEqual(proc.stdout.readline().strip(), "locked")
+        proc.kill()  # like Android killing a background check mid-way
+        proc.wait()
+        t = time.time()
+        deleted, freed, errors = rf.delete_many([i.id for i in rf.items()])
+        self.assertLess(time.time() - t, 3)
+        self.assertEqual((deleted, errors), (5, []))
+        self.assertEqual(rf.items(), [])
+        self.assertEqual([f for f in rf.files.iterdir()], [])
+
+    def test_lock_really_excludes_a_live_process(self):
+        from safesweep.review import ReviewError, ReviewFolder
+        rf = ReviewFolder(self.settings)
+        code = ("import sys,time; sys.path.insert(0, sys.argv[1]); "
+                "from safesweep.config import Settings; from safesweep.review import ReviewFolder; "
+                "rf = ReviewFolder(Settings(scan_paths=[], use_clamav=False)); "
+                "cm = rf._locked(); cm.__enter__(); print('locked', flush=True); time.sleep(30)")
+        proc = subprocess.Popen([sys.executable, "-c", code, str(PKG_DIR)], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(proc.stdout.readline().strip(), "locked")
+            with self.assertRaises(ReviewError):
+                with rf._locked(timeout=0.5):
+                    pass
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_delete_many_is_fast_and_complete(self):
+        from safesweep.review import ReviewFolder
+        rf = ReviewFolder(self.settings)
+        for i in range(300):
+            rf.move_in(self.finding(self.write(f"bulk/f{i}.tmp", str(i).encode())))
+        t = time.time()
+        deleted, freed, errors = rf.delete_many([i.id for i in rf.items()] + ["not-an-id"])
+        self.assertLess(time.time() - t, 5)
+        self.assertEqual(deleted, 300)
+        self.assertEqual(len(errors), 1)  # the bogus id is reported, not silently ignored
+        self.assertEqual(rf.items(), [])
+
     def test_long_unicode_name_roundtrip(self):
         from safesweep.review import ReviewFolder
         rf = ReviewFolder(self.settings)
@@ -459,6 +511,68 @@ class ScheduleTests(Base):
         for bad in ("25:00", "9", "12:60", "noon"):
             with self.assertRaises(ValueError):
                 schedule._parse_time(bad)
+
+
+class AuthKeyTests(Base):
+    KEY = "0123456789abcdef0123456789abcdef0123456789abcdef"  # made-up test key
+
+    def test_normalize_and_mask(self):
+        from safesweep import feeds
+        self.assertEqual(feeds.normalize_key(f'  "{self.KEY[:20]}\n{self.KEY[20:]}" '), self.KEY)
+        self.assertEqual(feeds.normalize_key(f"Auth-Key: {self.KEY}"), self.KEY)
+        for bad in ("", "short", "not a key at all!!", "x" * 300):
+            with self.assertRaises(ValueError):
+                feeds.normalize_key(bad)
+        self.assertEqual(feeds.masked_key(self.KEY), "0123…cdef")
+
+    def test_save_test_remove(self):
+        import urllib.error
+        from safesweep import feeds
+        from safesweep.config import Settings
+        s = Settings(use_clamav=False)
+        feeds.save_auth_key(s, self.KEY)
+        self.assertEqual(Settings.load().abusech_auth_key, self.KEY)
+
+        def rejected(url, dest, mx, h):
+            raise feeds.FeedError("server answered 401 Unauthorized - check your abuse.ch Auth-Key")
+        ok, msg = feeds.test_auth_key(s, fetch=rejected)
+        self.assertFalse(ok)
+        self.assertIn("did not accept", msg)
+
+        def offline(url, dest, mx, h):
+            raise feeds.FeedError("could not connect: Temporary failure in name resolution")
+        ok, msg = feeds.test_auth_key(s, fetch=offline)
+        self.assertFalse(ok)
+        self.assertIn("Couldn't reach", msg)
+
+        def blocked_by_proxy(url, dest, mx, h):  # a firewall's 403 is not abuse.ch rejecting the key
+            raise feeds.FeedError("could not connect: Tunnel connection failed: 403 Forbidden")
+        ok, msg = feeds.test_auth_key(s, fetch=blocked_by_proxy)
+        self.assertIn("Couldn't reach", msg)
+
+        csv = ('# "first_seen_utc","sha256_hash","md5_hash","sha1_hash","reporter","file_name",'
+               '"file_type_guess","mime_type","signature","clamav","vtpercent","imphash","ssdeep","tlsh"\n'
+               f'"2026-11-13 08:00:01", "{"ab" * 32}", "", "", "", "", "exe", "", "AgentTesla", "", "", "", "", ""\n')
+        import io
+        import zipfile
+        zbuf = io.BytesIO()
+        with zipfile.ZipFile(zbuf, "w") as z:
+            z.writestr("full.csv", '# "first_seen_utc","ioc_id","ioc_value","ioc_type","threat_type","fk_malware",'
+                       '"malware_alias","malware_printable","last_seen_utc","confidence_level","reference","tags",'
+                       f'"anonymous","reporter"\n"x","1","{"cd" * 32}","sha256_hash","p","x","","Lumma","","100","","","0","x"\n')
+        served = {feeds.SOURCES[0].url.format(key=self.KEY): csv.encode(),
+                  feeds.SOURCES[1].url.format(key=self.KEY): zbuf.getvalue()}
+
+        def works(url, dest, mx, h):
+            Path(dest).write_bytes(served[url])
+            return len(served[url])
+        ok, msg = feeds.test_auth_key(s, fetch=works)
+        self.assertTrue(ok, msg)
+        self.assertIn("Your key works", msg)
+        stored = "".join(p.read_text() for p in feeds.feeds_dir().glob("*.json"))
+        self.assertNotIn(self.KEY, stored)
+        feeds.remove_auth_key(s)
+        self.assertEqual(Settings.load().abusech_auth_key, "")
 
 
 class CliTests(Base):

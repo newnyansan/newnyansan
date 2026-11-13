@@ -142,6 +142,23 @@ def review_location_choices() -> dict:
     return {k: v for k, v in opts.items() if v is None or os.path.isdir(v)}
 
 
+def open_url(url: str) -> None:
+    """Open a web page in the phone's browser (or the desktop browser)."""
+    if is_android_app():
+        try:
+            from jnius import autoclass  # type: ignore
+            Intent = autoclass("android.content.Intent")
+            Uri = autoclass("android.net.Uri")
+            intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            _context().startActivity(intent)
+            return
+        except Exception:
+            pass
+    import webbrowser
+    webbrowser.open(url)
+
+
 def prepare_environment() -> None:
     """Point SafeSweep's data folder and temp dir at sensible places for this device."""
     if is_android_app():
@@ -329,9 +346,15 @@ KV = r"""
                 halign: 'left'
                 valign: 'middle'
             Plain:
+                text: 'Key'
+                size_hint: None, None
+                size: dp(56), dp(40)
+                font_size: '13sp'
+                on_release: root.key_dialog()
+            Plain:
                 text: 'Update lists'
                 size_hint: None, None
-                size: dp(110), dp(40)
+                size: dp(104), dp(40)
                 font_size: '13sp'
                 disabled: root.running
                 on_release: root.update_lists()
@@ -453,14 +476,15 @@ KV = r"""
                 on_release: root.select('all')
             Plain:
                 text: 'Restore'
-                disabled: root.selected_count == 0
+                disabled: root.selected_count == 0 or root.busy
                 on_release: root.restore_selected()
             Danger:
-                text: 'Delete %d' % root.selected_count
-                disabled: root.selected_count == 0
+                text: 'Working…' if root.busy else 'Delete %d' % root.selected_count
+                disabled: root.selected_count == 0 or root.busy
                 on_release: root.delete_selected()
         Plain:
             text: 'Delete items older than %d days' % root.retention
+            disabled: root.busy
             on_release: root.purge_expired()
 
 <PermissionView>:
@@ -768,6 +792,92 @@ def run() -> None:
 
             threading.Thread(target=job, daemon=True).start()
 
+        def key_dialog(self):
+            from kivy.uix.checkbox import CheckBox
+            from kivy.uix.textinput import TextInput
+            from . import feeds
+            from .config import Settings
+            settings = Settings.load()
+            box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+            info = Label(text=("A free [b]abuse.ch Auth-Key[/b] lets SafeSweep download the malware lists that "
+                               "abuse.ch updates every day, so it recognises the newest threats.\n\n"
+                               "1. Tap [b]Get a free key[/b] and sign in.\n2. Copy the Auth-Key from your profile.\n"
+                               "3. Paste it below and tap [b]Save[/b]."),
+                         markup=True, font_size="14sp", halign="left", valign="top", size_hint_y=None)
+            info.bind(width=lambda *_: setattr(info, "text_size", (info.width, None)),
+                      texture_size=lambda *_: setattr(info, "height", info.texture_size[1]))
+            box.add_widget(info)
+            k = settings.abusech_auth_key
+            current = Label(text=f"Saved key: {feeds.masked_key(k)}" if k else "No key saved yet.",
+                            color=(0.5, 0.95, 0.85, 1), font_size="13sp", size_hint_y=None, height=dp(24))
+            box.add_widget(current)
+            field = TextInput(password=True, multiline=False, hint_text="Paste your Auth-Key here",
+                              size_hint_y=None, height=dp(44), font_size="15sp", write_tab=False)
+            box.add_widget(field)
+            show = BoxLayout(size_hint_y=None, height=dp(32))
+            cb = CheckBox(size_hint_x=None, width=dp(36))
+            cb.bind(active=lambda _c, v: setattr(field, "password", not v))
+            show.add_widget(cb)
+            show.add_widget(Label(text="Show key", font_size="13sp", halign="left",
+                                  text_size=(dp(200), None)))
+            box.add_widget(show)
+            result = Label(text="", font_size="13sp", halign="left", valign="top", size_hint_y=None)
+            result.bind(width=lambda *_: setattr(result, "text_size", (result.width, None)),
+                        texture_size=lambda *_: setattr(result, "height", result.texture_size[1]))
+            box.add_widget(result)
+            box.add_widget(BoxLayout())  # spacer
+            row1 = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+            row2 = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+            pop = Popup(title="abuse.ch Auth-Key", content=box, size_hint=(0.95, 0.85), auto_dismiss=False)
+
+            def get_key(*_):
+                open_url(feeds.KEY_SIGNUP_URL)
+
+            def save(*_):
+                try:
+                    feeds.save_auth_key(settings, field.text)
+                except ValueError as e:
+                    result.text = str(e)
+                    return
+                field.text = ""
+                current.text = f"Saved key: {feeds.masked_key(settings.abusech_auth_key)}"
+                result.text = "Saved. Checking the key with abuse.ch…"
+                save_btn.disabled = True
+
+                def job():
+                    try:
+                        ok, msg = feeds.test_auth_key(settings, progress=app.set_status)
+                    except Exception as e:
+                        msg = f"Error: {e}"
+                    finished(msg)
+
+                @mainthread
+                def finished(msg):
+                    result.text = msg
+                    save_btn.disabled = False
+                    self.refresh_feed_status()
+
+                threading.Thread(target=job, daemon=True).start()
+
+            def remove(*_):
+                feeds.remove_auth_key(settings)
+                current.text = "No key saved yet."
+                result.text = "Key removed."
+                self.refresh_feed_status()
+
+            for label, fn, row in (("Get a free key", get_key, row1), ("Remove key", remove, row1),
+                                   ("Close", lambda *_: pop.dismiss(), row2)):
+                b = Button(text=label)
+                b.bind(on_release=fn)
+                row.add_widget(b)
+            save_btn = Button(text="Save", bold=True, background_normal="",
+                              background_color=(0.05, 0.55, 0.50, 1))
+            save_btn.bind(on_release=save)
+            row2.add_widget(save_btn)
+            box.add_widget(row1)
+            box.add_widget(row2)
+            pop.open()
+
         @mainthread
         def lists_updated(self, lines):
             self.running = False
@@ -862,6 +972,7 @@ def run() -> None:
         folder = StringProperty("")
         retention = NumericProperty(30)
         location_label = StringProperty("")
+        busy = BooleanProperty(False)
         location_choices = ListProperty([])
 
         def _sync_location(self, settings):
@@ -945,21 +1056,49 @@ def run() -> None:
         def _picked(self):
             return [it for it, d in zip(self.items, self.ids.rv.data) if d["selected"]]
 
+        def _run_in_background(self, busy_text, work, done):
+            """Do slow file work off the screen's thread so the app never freezes."""
+            self.busy = True
+            app.set_status(busy_text)
+
+            def job():
+                try:
+                    res, err = work(), None
+                except Exception as e:  # shown to the user, never swallowed
+                    res, err = None, e
+                finish(res, err)
+
+            @mainthread
+            def finish(res, err):
+                self.busy = False
+                self.refresh()
+                done(res, err)
+
+            threading.Thread(target=job, daemon=True).start()
+
         def restore_selected(self):
             picked = self._picked()
             threats = [it for it in picked if it.category == "threat"]
 
             def go():
-                errors = []
-                for it in picked:
-                    try:
-                        self.rf.restore(it.id)
-                    except Exception as e:
-                        errors.append(f"{os.path.basename(it.original_path)}: {e}")
-                self.refresh()
-                app.set_status(f"Restored {len(picked) - len(errors)} item(s).")
-                if errors:
-                    popup("Some items could not be restored", "\n".join(errors[:20]))
+                def work():
+                    errors = []
+                    for it in picked:
+                        try:
+                            self.rf.restore(it.id)
+                        except Exception as e:
+                            errors.append(f"{os.path.basename(it.original_path)}: {e}")
+                    return errors
+
+                def done(errors, err):
+                    if err:
+                        popup("Could not restore", str(err))
+                        return
+                    app.set_status(f"Restored {len(picked) - len(errors)} item(s).")
+                    if errors:
+                        popup("Some items could not be restored", "\n".join(errors[:20]), tall=True)
+
+                self._run_in_background(f"Restoring {len(picked)} item(s)…", work, done)
 
             if threats:
                 popup("Restore a flagged threat?",
@@ -973,23 +1112,32 @@ def run() -> None:
             size = sum(i.size for i in picked)
 
             def go():
-                freed = 0
-                for it in picked:
-                    try:
-                        freed += self.rf.delete(it.id)
-                    except Exception:
-                        pass
-                self.refresh()
-                app.set_status(f"Deleted {len(picked)} item(s), freed {human(freed)}.")
+                def done(res, err):
+                    if err:
+                        popup("Nothing was deleted", f"{err}")
+                        return
+                    deleted, freed, errors = res
+                    app.set_status(f"Deleted {deleted} item(s), freed {human(freed)}.")
+                    if errors:
+                        popup(f"{len(errors)} item(s) could not be deleted", "\n".join(errors[:20]), tall=True)
+
+                self._run_in_background(f"Deleting {len(picked)} item(s)…",
+                                        lambda: self.rf.delete_many([it.id for it in picked]), done)
 
             popup("Delete permanently?", f"Delete {len(picked)} item(s) ({human(size)}) for good?\n\nThis cannot be undone.",
                   (("Cancel", None), ("Delete", go)))
 
         def purge_expired(self):
             def go():
-                n, freed = self.rf.purge(self.retention)
-                self.refresh()
-                app.set_status(f"Deleted {n} old item(s), freed {human(freed)}.")
+                def done(res, err):
+                    if err:
+                        popup("Could not delete old items", str(err))
+                        return
+                    n, freed = res
+                    app.set_status(f"Deleted {n} old item(s), freed {human(freed)}.")
+
+                self._run_in_background("Deleting old items…", lambda: self.rf.purge(self.retention), done)
+
             popup("Delete old items?", f"Permanently delete items that have been in review for {self.retention}+ days?",
                   (("Cancel", None), ("Delete", go)))
 
@@ -1151,6 +1299,22 @@ def run() -> None:
                 self.main.ids.review_tab.state = "down"
                 self.review_screen.refresh()
                 print(f"AUTOTEST review items={len(self.review_screen.items)} folder={self.review_screen.folder}")
+                # the "All" -> "Delete" path from the Review screen, timed (reported phone bug)
+                rs = self.review_screen
+                rs.select("all")
+                ids = [it.id for it in rs._picked()]
+                t0 = time.time()
+
+                def deleted(res, err):
+                    got = res[0] if res else 0
+                    errs = res[2] if res else [str(err)]
+                    print(f"AUTOTEST delete-all deleted={got} errors={errs} remaining={len(rs.items)} "
+                          f"secs={time.time() - t0:.1f}")
+                    arm_background_check()
+
+                rs._run_in_background(f"Deleting {len(ids)} item(s)…", lambda: rs.rf.delete_many(ids), deleted)
+
+            def arm_background_check():
                 print(f"AUTOTEST daily {daily_check_info()}")
                 try:
                     from jnius import autoclass  # type: ignore

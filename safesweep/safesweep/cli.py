@@ -199,11 +199,17 @@ def cmd_review(args, settings: Settings) -> int:
             if args.action == "delete" and not args.yes and \
                     _ask(f"Permanently delete {len(args.ids)} item(s)? This cannot be undone. [y/N] ").lower() != "y":
                 return 0
-            for i in args.ids:
-                if args.action == "restore":
+            if args.action == "restore":
+                for i in args.ids:
                     print(f"Restored to {rf.restore(i)}")
-                else:
-                    print(f"Deleted {i} ({human(rf.delete(i))} freed)")
+            else:
+                ids = [rf.get(i).id for i in args.ids]
+                deleted, freed, errors = rf.delete_many(ids)
+                print(f"Deleted {deleted} item(s), {human(freed)} freed.")
+                for e in errors:
+                    print(f"  could not delete {e}")
+                if errors:
+                    return 2
         elif args.action == "location":
             if not args.ids:
                 print(f"Review folder: {rf.root}")

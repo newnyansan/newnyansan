@@ -56,6 +56,7 @@ check "cleanup found the duplicate photo"      "AUTOTEST clean rec=True IMG_1001
 check "cleanup found the partial download"     "AUTOTEST clean rec=True video.mp4.part"
 check "files were moved to the Review folder"  "AUTOTEST moved=2 errors=\[\]"
 check "Review folder lists them"               "AUTOTEST review items=2"
+check "All -> Delete empties the Review folder quickly" "AUTOTEST delete-all deleted=2 errors=\[\] remaining=0 secs=[0-4]\."
 check "finished"                               "AUTOTEST done"
 check "threat lists downloaded on the phone (verified HTTPS)" "AUTOTEST feeds Online threat lists: [0-9,]+ known"
 # --- the automatic daily check, started in the background by the real alarm

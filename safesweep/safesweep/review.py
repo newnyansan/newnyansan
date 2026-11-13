@@ -138,46 +138,64 @@ class ReviewFolder:
         self.repair()
 
     # -- locking ----------------------------------------------------------------
-    def _lock_is_stale(self) -> bool:
-        age = time.time() - self._lockfile.stat().st_mtime
-        try:
-            pid = int(self._lockfile.read_text().strip() or 0)
-        except (OSError, ValueError):
-            pid = 0
-        if pid and os.name != "nt":
+    # An operating-system file lock: if a SafeSweep process is killed (Android does that to
+    # background work), the system releases the lock by itself, so it can never get stuck.
+    def _lock_path(self) -> Path:
+        private = os.environ.get("ANDROID_PRIVATE")  # app-private storage: real file locks work there
+        if private and os.path.isdir(private):
+            return Path(private) / "review.lock"
+        return self._lockfile
+
+    @staticmethod
+    def _os_lock(fd: int) -> bool:
+        """Try once to take the lock. True = taken, False = held by someone else."""
+        if os.name == "nt":
+            import msvcrt
             try:
-                os.kill(pid, 0)
-                return age > 6 * 3600  # owner alive: only if absurdly old
-            except ProcessLookupError:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                 return True
-            except PermissionError:
-                pass
-        return age > 600
+            except OSError:
+                return False
+        import fcntl
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+        except OSError as e:
+            if e.errno in (errno.EAGAIN, errno.EACCES):
+                return False
+            raise  # file locks not supported here
+
+    @staticmethod
+    def _os_unlock(fd: int) -> None:
+        with contextlib.suppress(OSError):
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
 
     @contextlib.contextmanager
     def _locked(self, timeout: float = 15.0):
-        deadline = time.time() + timeout
-        while True:
-            try:
-                fd = os.open(self._lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode())
-                os.close(fd)
-                break
-            except FileExistsError:
-                try:  # stale lock from a crashed process
-                    if self._lock_is_stale():
-                        self._lockfile.unlink()
-                        continue
-                except OSError:
-                    continue
-                if time.time() > deadline:
-                    raise ReviewError("The Review folder is busy (another SafeSweep window?). Try again.")
-                time.sleep(0.05)
+        path = self._lock_path()
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
-            yield
+            deadline = time.time() + timeout
+            while not self._os_lock(fd):
+                if time.time() > deadline:
+                    raise ReviewError("The Review folder is busy (an automatic check or another SafeSweep "
+                                      "window is using it). Try again in a moment.")
+                time.sleep(0.05)
+            try:
+                yield
+            finally:
+                self._os_unlock(fd)
         finally:
-            with contextlib.suppress(OSError):
-                self._lockfile.unlink()
+            os.close(fd)
 
     # -- manifest ---------------------------------------------------------------
     def _read(self, path: Path) -> Optional[dict[str, ReviewItem]]:
@@ -427,11 +445,43 @@ class ReviewFolder:
         _log(f"deleted permanently {item.original_path}")
         return size
 
+    def delete_many(self, item_ids: list) -> tuple[int, int, list]:
+        """Permanently delete several items in one go (one lock, one record update).
+
+        Returns (deleted, bytes freed, errors). Items that fail stay in the Review folder.
+        """
+        deleted, freed, errors, logged = 0, 0, [], []
+        with self._locked():
+            items = self._load()
+            for item_id in item_ids:
+                item = items.get(item_id)
+                if item is None:
+                    errors.append(f"{item_id}: no longer in the Review folder")
+                    continue
+                p = self.stored_path(item)
+                try:
+                    size = p.stat().st_size if p.exists() else 0
+                    if p.exists():
+                        with contextlib.suppress(OSError):
+                            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)  # Windows read-only files
+                        p.unlink()
+                except OSError as e:
+                    errors.append(f"{os.path.basename(item.original_path)}: {e.strerror or e}")
+                    continue
+                del items[item_id]
+                deleted += 1
+                freed += size
+                logged.append(item.original_path)
+            if deleted:
+                self._save(items)
+        for path in logged:
+            _log(f"deleted permanently {path}")
+        return deleted, freed, errors
+
     def purge(self, older_than_days: Optional[float] = None) -> tuple[int, int]:
         """Permanently delete everything (or only items older than N days)."""
-        count = freed = 0
-        for item in self.items():
-            if older_than_days is None or item.age_days >= older_than_days:
-                freed += self.delete(item.id)
-                count += 1
-        return count, freed
+        ids = [i.id for i in self.items() if older_than_days is None or i.age_days >= older_than_days]
+        deleted, freed, errors = self.delete_many(ids)
+        if errors:
+            raise ReviewError(f"{len(errors)} item(s) could not be deleted: " + "; ".join(errors[:5]))
+        return deleted, freed

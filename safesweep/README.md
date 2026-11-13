@@ -60,8 +60,11 @@ trojans, ransomware, info-stealers, etc. Only these built-in sources are used, o
 | [ClamAV](https://www.clamav.net) official definitions | Updated daily with `freshclam` when ClamAV is installed | No |
 
 **Get the daily-updated abuse.ch lists (recommended):** abuse.ch requires a free personal key for downloads.
-Sign in at <https://auth.abuse.ch>, copy your Auth-Key, then run
-`safesweep settings --set abusech_auth_key=YOUR_KEY` (the key is never printed or written into logs).
+Sign in at <https://auth.abuse.ch> and copy your Auth-Key, then paste it into **abuse.ch key…**
+(Virus Scan tab on Windows) or **Key** (Scan screen on the phone) and tap **Save** - SafeSweep checks
+the key with abuse.ch straight away and tells you if it works. From the command line:
+`safesweep settings --set abusech_auth_key=YOUR_KEY`. The key is shown masked and is never printed
+or written into logs.
 
 - Lists refresh automatically (daily; VirusShare weekly) and build up over time; abuse.ch entries expire after a year.
 - Certificates are verified; redirects to other hosts, oversized downloads, web/error pages and empty
