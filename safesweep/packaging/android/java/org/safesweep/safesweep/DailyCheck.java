@@ -27,6 +27,8 @@ import androidx.work.WorkManager;
  * - If a run was missed (phone off), the check runs ~10 minutes after the alarm is re-armed.
  */
 public class DailyCheck {
+    // Preferences are written with commit() (synchronous): the check service's process exits
+    // right after a run, and a pending apply() made it abort while shutting down.
     static final String PREFS = "safesweep_auto";
     static final int ALARM_REQUEST = 4711;
     static final int RESULT_NOTIFICATION = 4712;
@@ -38,7 +40,7 @@ public class DailyCheck {
     }
 
     public static void enable(Context ctx, int hour, int minute) {
-        prefs(ctx).edit().putBoolean("enabled", true).putInt("hour", hour).putInt("minute", minute).apply();
+        prefs(ctx).edit().putBoolean("enabled", true).putInt("hour", hour).putInt("minute", minute).commit();
         arm(ctx);
         PeriodicWorkRequest req = new PeriodicWorkRequest.Builder(RearmWorker.class, 6, TimeUnit.HOURS).build();
         WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(
@@ -46,7 +48,7 @@ public class DailyCheck {
     }
 
     public static void disable(Context ctx) {
-        prefs(ctx).edit().putBoolean("enabled", false).putLong("next_run", 0).apply();
+        prefs(ctx).edit().putBoolean("enabled", false).putLong("next_run", 0).commit();
         AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
         am.cancel(pendingIntent(ctx));
         WorkManager.getInstance(ctx).cancelUniqueWork("safesweep-rearm");
@@ -65,7 +67,7 @@ public class DailyCheck {
     }
 
     public static void markRun(Context ctx) {
-        prefs(ctx).edit().putLong("last_run", System.currentTimeMillis()).apply();
+        prefs(ctx).edit().putLong("last_run", System.currentTimeMillis()).commit();
     }
 
     static PendingIntent pendingIntent(Context ctx) {
@@ -116,7 +118,7 @@ public class DailyCheck {
         } else {
             am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, when, pi);
         }
-        prefs(ctx).edit().putLong("next_run", when).apply();
+        prefs(ctx).edit().putLong("next_run", when).commit();
     }
 
     public static void notifyResult(Context ctx, String title, String text) {

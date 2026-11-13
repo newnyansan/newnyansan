@@ -303,7 +303,7 @@ class ReviewFolder:
             for item in items.values():
                 with contextlib.suppress(OSError):
                     (old_files / item.stored_name).unlink()
-            for name in (MANIFEST, MANIFEST + ".bak", MANIFEST.replace(".json", ".tmp")):
+            for name in (MANIFEST, MANIFEST + ".bak", MANIFEST.replace(".json", ".tmp"), ".nomedia"):
                 with contextlib.suppress(OSError):
                     (old_root / name).unlink()
         with contextlib.suppress(OSError):
