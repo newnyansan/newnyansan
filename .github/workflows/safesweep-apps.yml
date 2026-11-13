@@ -126,6 +126,12 @@ jobs:
           git clone --depth 1 --branch master https://github.com/kivy/python-for-android.git "$RUNNER_TEMP/p4a"
           sed -i "s/'-m', 'venv', 'venv')/'-m', 'venv', '--clear', 'venv')/" "$RUNNER_TEMP/p4a/pythonforandroid/build.py"
           grep -n "'-m', 'venv', '--clear', 'venv'" "$RUNNER_TEMP/p4a/pythonforandroid/build.py" || { echo "patch did not apply"; exit 1; }
+          # The kivy recipe pip-installs requests & co. (only used by kivy's UrlRequest, which
+          # SafeSweep doesn't use). requests now pulls Android-only charset-normalizer wheels that
+          # p4a's final pip step rejects ("not a supported wheel on this platform").
+          KIVY="$RUNNER_TEMP/p4a/pythonforandroid/recipes/kivy/__init__.py"
+          sed -i -E "s/python_depends = \[[^]]*\]/python_depends = ['filetype']/" "$KIVY"
+          grep -n "python_depends = \['filetype'\]" "$KIVY" || { echo "kivy patch did not apply"; exit 1; }
           python - <<PY
           p = "buildozer.spec"
           s = open(p).read().replace("p4a.branch = master", "p4a.branch = master\np4a.source_dir = $RUNNER_TEMP/p4a")
