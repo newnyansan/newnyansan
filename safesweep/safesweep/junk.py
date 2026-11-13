@@ -226,7 +226,11 @@ def find_duplicates(by_size: dict[int, list[FileInfo]], progress: Optional[Progr
         # Hard links / the same file reached twice are NOT duplicates.
         unique: dict = {}
         for i in infos:
-            key = (i.st.st_dev, i.st.st_ino) if i.st.st_ino else os.path.normcase(os.path.realpath(i.path))
+            try:
+                st = i.st if i.st.st_ino else os.stat(i.path)  # Windows folder listings report inode 0
+            except OSError:
+                continue
+            key = (st.st_dev, st.st_ino) if st.st_ino else os.path.normcase(os.path.realpath(i.path))
             unique.setdefault(key, i)
         infos = list(unique.values())
         if len(infos) < 2:
