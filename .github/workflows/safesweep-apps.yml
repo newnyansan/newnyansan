@@ -118,6 +118,20 @@ jobs:
           sudo apt-get install -y -qq autoconf automake libtool libltdl-dev pkg-config zlib1g-dev \
             libncurses-dev cmake libffi-dev libssl-dev zip unzip lld
           python -m pip install --upgrade buildozer==1.6.0 "cython<=3.0.12" setuptools
+      - name: Get python-for-android and fix its multi-architecture venv bug
+        run: |
+          # p4a re-creates its pip venv for every architecture on top of the previous one,
+          # leaving a half-upgraded pip that crashes on the 2nd architecture
+          # ("cannot import name 'capture_logging'"). Re-create it cleanly instead.
+          git clone --depth 1 --branch master https://github.com/kivy/python-for-android.git "$RUNNER_TEMP/p4a"
+          sed -i "s/'-m', 'venv', 'venv')/'-m', 'venv', '--clear', 'venv')/" "$RUNNER_TEMP/p4a/pythonforandroid/build.py"
+          grep -n "'-m', 'venv', '--clear', 'venv'" "$RUNNER_TEMP/p4a/pythonforandroid/build.py" || { echo "patch did not apply"; exit 1; }
+          python - <<PY
+          p = "buildozer.spec"
+          s = open(p).read().replace("p4a.branch = master", "p4a.branch = master\np4a.source_dir = $RUNNER_TEMP/p4a")
+          open(p, "w").write(s)
+          PY
+          grep -n "p4a\." buildozer.spec
       - name: Build the APK
         run: |
           set -o pipefail

@@ -129,6 +129,9 @@ iscc /DAppVersion=0.3.0 packaging/windows/installer.iss     # -> dist/SafeSweep-
 
 # Android (on Linux/macOS/WSL)
 pip install buildozer "cython<=3.0.12"
+# python-for-android needs a one-line fix for multi-architecture builds (see the
+# "Get python-for-android" step in .github/workflows/safesweep-apps.yml), or build one
+# architecture at a time by setting android.archs = arm64-v8a
 buildozer android debug                                     # -> bin/*.apk
 ```
 
